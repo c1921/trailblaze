@@ -404,6 +404,7 @@ mod tests {
         assert!(
             crate::navigation::path_to_waypoints(
                 &geometry,
+                &mut crate::navigation::PathCache::default(),
                 Vec3::new(-1.2, 0.0, 1.0),
                 entrance.world_position,
             )

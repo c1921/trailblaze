@@ -3,7 +3,7 @@ use bevy::prelude::*;
 use crate::{
     building::{Blueprint, BuildingEntrance, CompletedBuilding, WorldGeometry},
     math::xz_distance,
-    navigation::{line_of_sight_clear, path_to_waypoints},
+    navigation::{line_of_sight_clear, path_to_waypoints, PathCache},
     resources::ResourceStock,
     simulation::SimulationClock,
     types::{BuildingKind, ResourceKind},
@@ -20,6 +20,7 @@ pub struct ColonistPlugin;
 
 impl Plugin for ColonistPlugin {
     fn build(&self, app: &mut App) {
+        app.init_resource::<PathCache>();
         app.add_systems(Update, (assign_idle_colonists, update_colonists));
     }
 }
@@ -29,6 +30,7 @@ pub struct Colonist {
     pub name: String,
     pub state: ColonistState,
     pub speed: f32,
+    pub path_rebuild_timer: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -99,6 +101,7 @@ impl Task {
 pub fn assign_idle_colonists(
     mut stock: ResMut<ResourceStock>,
     geometry: Res<WorldGeometry>,
+    mut cache: ResMut<PathCache>,
     mut colonists: Query<(&mut Colonist, &Transform)>,
     blueprints: Query<(Entity, &Blueprint, &Transform, Option<&BuildingEntrance>)>,
     resources: Query<(Entity, &ResourceNode, &Transform)>,
@@ -119,79 +122,86 @@ pub fn assign_idle_colonists(
 
         let start = transform.translation;
 
-        let mut delivery_candidate: Option<(i32, usize, Entity, i32, ColonistState)> = None;
-        for (entity, blueprint, blueprint_transform, entrance) in &blueprints {
-            let reserved = reserved_deliveries
-                .iter()
-                .filter(|(target, _)| *target == entity)
-                .map(|(_, wood)| *wood)
-                .sum::<i32>();
-            let remaining = blueprint.needs_wood() - reserved;
-            if remaining <= 0 {
-                continue;
-            }
+        let mut delivery_candidates: Vec<(i32, f32, Entity, i32, Vec3, Task)> = blueprints
+            .iter()
+            .filter_map(|(entity, blueprint, blueprint_transform, entrance)| {
+                let reserved = reserved_deliveries
+                    .iter()
+                    .filter(|(target, _)| *target == entity)
+                    .map(|(_, wood)| *wood)
+                    .sum::<i32>();
+                let remaining = blueprint.needs_wood() - reserved;
+                if remaining <= 0 {
+                    return None;
+                }
+                let wood = MATERIAL_DELIVERY_SIZE.min(remaining);
+                let target = building_interaction_position(blueprint_transform, entrance);
+                Some((
+                    remaining,
+                    xz_distance(start, target),
+                    entity,
+                    wood,
+                    target,
+                    Task::DeliverMaterial {
+                        blueprint: entity,
+                        wood,
+                    },
+                ))
+            })
+            .collect();
 
-            let wood = MATERIAL_DELIVERY_SIZE.min(remaining);
-            let target = building_interaction_position(blueprint_transform, entrance);
-            let task = Task::DeliverMaterial {
-                blueprint: entity,
-                wood,
-            };
-            let Some((state, path_len)) = moving_state_to_target(&geometry, start, target, task)
-            else {
-                continue;
-            };
+        delivery_candidates.sort_by(|(rem_a, dist_a, ..), (rem_b, dist_b, ..)| {
+            rem_b
+                .cmp(rem_a)
+                .then_with(|| dist_a.total_cmp(dist_b))
+        });
 
-            if delivery_candidate
-                .as_ref()
-                .map(|(best_remaining, best_len, _, _, _)| {
-                    remaining < *best_remaining
-                        || (remaining == *best_remaining && path_len < *best_len)
-                })
-                .unwrap_or(true)
-            {
-                delivery_candidate = Some((remaining, path_len, entity, wood, state));
+        let mut assigned = false;
+        for (_, _, entity, wood, target, task) in &delivery_candidates {
+            if let Some((state, _)) = moving_state_to_target(&geometry, &mut *cache, start, *target, task.clone()) {
+                if stock.remove(ResourceKind::Wood, *wood) {
+                    colonist.state = state;
+                    reserved_deliveries.push((*entity, *wood));
+                    assigned = true;
+                    break;
+                }
             }
         }
+        if assigned {
+            continue;
+        }
 
-        if let Some((_, _, blueprint_entity, wood, state)) = delivery_candidate {
-            if stock.remove(ResourceKind::Wood, wood) {
+        let mut build_candidates: Vec<(f32, Vec3, Task)> = blueprints
+            .iter()
+            .filter(|(_, blueprint, _, _)| {
+                blueprint.has_materials() && blueprint.progress < blueprint.build_seconds
+            })
+            .map(|(entity, _, blueprint_transform, entrance)| {
+                let target = building_interaction_position(blueprint_transform, entrance);
+                (
+                    xz_distance(start, target),
+                    target,
+                    Task::Build { blueprint: entity },
+                )
+            })
+            .collect();
+
+        build_candidates.sort_by(|(dist_a, ..), (dist_b, ..)| dist_a.total_cmp(dist_b));
+
+        for (_, target, task) in &build_candidates {
+            if let Some((state, _)) = moving_state_to_target(&geometry, &mut *cache, start, *target, task.clone()) {
                 colonist.state = state;
-                reserved_deliveries.push((blueprint_entity, wood));
-                continue;
+                assigned = true;
+                break;
             }
         }
-
-        let mut build_candidate: Option<(usize, ColonistState)> = None;
-        for (entity, blueprint, blueprint_transform, entrance) in &blueprints {
-            if !blueprint.has_materials() || blueprint.progress >= blueprint.build_seconds {
-                continue;
-            }
-
-            let target = building_interaction_position(blueprint_transform, entrance);
-            let task = Task::Build { blueprint: entity };
-            let Some((state, path_len)) = moving_state_to_target(&geometry, start, target, task)
-            else {
-                continue;
-            };
-
-            if build_candidate
-                .as_ref()
-                .map(|(best_len, _)| path_len < *best_len)
-                .unwrap_or(true)
-            {
-                build_candidate = Some((path_len, state));
-            }
-        }
-
-        if let Some((_, state)) = build_candidate {
-            colonist.state = state;
+        if assigned {
             continue;
         }
 
         if has_woodcutter {
             if let Some((_, state)) =
-                gather_candidate(&geometry, start, ResourceKind::Wood, &resources)
+                gather_candidate(&geometry, &mut *cache, start, ResourceKind::Wood, &resources)
             {
                 colonist.state = state;
                 continue;
@@ -200,7 +210,7 @@ pub fn assign_idle_colonists(
 
         if has_gatherer {
             if let Some((_, state)) =
-                gather_candidate(&geometry, start, ResourceKind::Food, &resources)
+                gather_candidate(&geometry, &mut *cache, start, ResourceKind::Food, &resources)
             {
                 colonist.state = state;
             }
@@ -229,22 +239,40 @@ fn active_material_deliveries(
 
 fn gather_candidate(
     geometry: &WorldGeometry,
+    cache: &mut PathCache,
     start: Vec3,
     kind: ResourceKind,
     resources: &Query<(Entity, &ResourceNode, &Transform)>,
 ) -> Option<(usize, ColonistState)> {
-    resources
+    let mut candidates: Vec<(f32, Entity, Vec3)> = resources
         .iter()
         .filter(|(_, node, _)| node.kind == kind && node.amount > 0)
-        .filter_map(|(resource, _, transform)| {
-            movement_to_resource(
-                geometry,
-                start,
+        .map(|(resource, _, transform)| {
+            (
+                xz_distance(start, transform.translation),
+                resource,
                 transform.translation,
-                Task::Gather { resource, kind },
             )
         })
-        .min_by_key(|(path_len, _)| *path_len)
+        .collect();
+
+    candidates.sort_by(|(dist_a, ..), (dist_b, ..)| dist_a.total_cmp(dist_b));
+
+    for (_, resource, pos) in &candidates {
+        if let Some(result) = movement_to_resource(
+            geometry,
+            cache,
+            start,
+            *pos,
+            Task::Gather {
+                resource: *resource,
+                kind,
+            },
+        ) {
+            return Some(result);
+        }
+    }
+    None
 }
 
 fn building_interaction_position(
@@ -258,11 +286,12 @@ fn building_interaction_position(
 
 fn moving_state_to_target(
     geometry: &WorldGeometry,
+    cache: &mut PathCache,
     start: Vec3,
     target: Vec3,
     task: Task,
 ) -> Option<(ColonistState, usize)> {
-    let path = path_to_waypoints(geometry, start, target)?;
+    let path = path_to_waypoints(geometry, cache, start, target)?;
     let path_len = path.len();
 
     Some((ColonistState::Moving { target, path, task }, path_len))
@@ -270,18 +299,25 @@ fn moving_state_to_target(
 
 fn movement_to_resource(
     geometry: &WorldGeometry,
+    cache: &mut PathCache,
     start: Vec3,
     resource_position: Vec3,
     task: Task,
 ) -> Option<(usize, ColonistState)> {
-    resource_interaction_targets(resource_position)
+    let mut targets: Vec<(f32, Vec3)> = resource_interaction_targets(resource_position)
         .into_iter()
         .filter(|target| geometry.is_walkable_point(*target))
-        .filter_map(|target| {
-            let (state, path_len) = moving_state_to_target(geometry, start, target, task.clone())?;
-            Some((path_len, state))
-        })
-        .min_by_key(|(path_len, _)| *path_len)
+        .map(|target| (xz_distance(start, target), target))
+        .collect();
+
+    targets.sort_by(|(dist_a, ..), (dist_b, ..)| dist_a.total_cmp(dist_b));
+
+    for (_, target) in &targets {
+        if let Some((state, path_len)) = moving_state_to_target(geometry, cache, start, *target, task.clone()) {
+            return Some((path_len, state));
+        }
+    }
+    None
 }
 
 fn resource_interaction_targets(resource_position: Vec3) -> [Vec3; 8] {
@@ -302,6 +338,7 @@ fn resource_interaction_targets(resource_position: Vec3) -> [Vec3; 8] {
 
 fn deposit_moving_state(
     geometry: &WorldGeometry,
+    cache: &mut PathCache,
     start: Vec3,
     completed: &Query<
         (&CompletedBuilding, &Transform, Option<&BuildingEntrance>),
@@ -309,41 +346,37 @@ fn deposit_moving_state(
     >,
     task: Task,
 ) -> ColonistState {
-    let mut storage_target: Option<Vec3> = None;
-    let mut best_storage: Option<(usize, ColonistState)> = None;
-    for (building, transform, entrance) in completed.iter() {
-        if building.kind != BuildingKind::Storage {
-            continue;
-        }
+    let mut storage_targets: Vec<(f32, Vec3)> = completed
+        .iter()
+        .filter(|(building, _, _)| building.kind == BuildingKind::Storage)
+        .map(|(_, transform, entrance)| {
+            let target = building_interaction_position(transform, entrance);
+            (xz_distance(start, target), target)
+        })
+        .collect();
 
-        let target = building_interaction_position(transform, entrance);
-        storage_target.get_or_insert(target);
-        if let Some((state, path_len)) =
-            moving_state_to_target(geometry, start, target, task.clone())
-        {
-            if best_storage
-                .as_ref()
-                .map(|(best_len, _)| path_len < *best_len)
-                .unwrap_or(true)
-            {
-                best_storage = Some((path_len, state));
-            }
+    storage_targets.sort_by(|(a, _), (b, _)| a.total_cmp(b));
+
+    for (_, target) in &storage_targets {
+        if let Some((state, _)) = moving_state_to_target(geometry, cache, start, *target, task.clone()) {
+            return state;
         }
     }
 
-    if let Some((_, state)) = best_storage {
-        return state;
-    }
-    if storage_target.is_none() {
+    if storage_targets.is_empty() {
         if let Some((state, _)) =
-            moving_state_to_target(geometry, start, STOCKPILE_POSITION, task.clone())
+            moving_state_to_target(geometry, cache, start, STOCKPILE_POSITION, task.clone())
         {
             return state;
         }
     }
 
+    let fallback_target = storage_targets
+        .first()
+        .map(|(_, t)| *t)
+        .unwrap_or(STOCKPILE_POSITION);
     ColonistState::Moving {
-        target: storage_target.unwrap_or(STOCKPILE_POSITION),
+        target: fallback_target,
         path: Vec::new(),
         task,
     }
@@ -354,6 +387,7 @@ pub fn update_colonists(
     time: Res<Time>,
     clock: Res<SimulationClock>,
     mut geometry: ResMut<WorldGeometry>,
+    mut cache: ResMut<PathCache>,
     mut stock: ResMut<ResourceStock>,
     mut colonists: Query<(&mut Colonist, &mut Transform)>,
     mut blueprints: Query<&mut Blueprint>,
@@ -367,9 +401,10 @@ pub fn update_colonists(
     if dt == 0.0 {
         return;
     }
+    cache.clear();
 
     for (mut colonist, mut transform) in &mut colonists {
-        let current_state = colonist.state.clone();
+        let current_state = std::mem::replace(&mut colonist.state, ColonistState::Idle);
         match current_state {
             ColonistState::Idle => {}
             ColonistState::Moving {
@@ -377,9 +412,27 @@ pub fn update_colonists(
                 mut path,
                 task,
             } => {
-                if path_needs_rebuild(&path, transform.translation, target, &geometry) {
+                let path_blocked = if !path.is_empty() {
+                    !line_of_sight_clear(&geometry, transform.translation, path[0])
+                } else {
+                    false
+                };
+
+                let needs_rebuild = if path_blocked
+                    || (colonist.path_rebuild_timer <= 0.0
+                        && path_needs_rebuild(&path, transform.translation, target, &geometry))
+                {
+                    colonist.path_rebuild_timer = 0.25;
+                    true
+                } else {
+                    colonist.path_rebuild_timer -= dt;
+                    false
+                };
+
+                if needs_rebuild {
                     if let Some((state, _)) = moving_state_to_target(
                         &geometry,
+                        &mut *cache,
                         transform.translation,
                         target,
                         task.clone(),
@@ -454,6 +507,7 @@ pub fn update_colonists(
                 if amount > 0 {
                     colonist.state = deposit_moving_state(
                         &geometry,
+                        &mut *cache,
                         transform.translation,
                         &completed,
                         Task::Deposit { kind, amount },

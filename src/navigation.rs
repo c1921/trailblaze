@@ -1,13 +1,26 @@
-use std::{cmp::Ordering, collections::BinaryHeap};
+use std::{cmp::Ordering, collections::{BinaryHeap, HashMap}};
 
 use bevy::prelude::*;
 
-use crate::building::{WorldGeometry, expanded_polygon, segment_intersects_polygon};
+use crate::building::{WorldGeometry, expanded_polygon};
 use crate::math::{xz, xz_distance};
 
 const AGENT_RADIUS: f32 = 0.08;
 const VISIBILITY_NODE_MARGIN: f32 = 0.16;
 const NODE_DEDUP_DISTANCE: f32 = 0.05;
+
+const CACHE_GRID: f32 = 0.5;
+
+#[derive(Resource, Default)]
+pub struct PathCache {
+    cache: HashMap<(i32, i32, i32, i32), Option<Vec<Vec3>>>,
+}
+
+impl PathCache {
+    pub fn clear(&mut self) {
+        self.cache.clear();
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 struct PathNode {
@@ -48,7 +61,33 @@ impl PartialOrd for PathNode {
     }
 }
 
-pub fn path_to_waypoints(geometry: &WorldGeometry, start: Vec3, target: Vec3) -> Option<Vec<Vec3>> {
+fn snap_to_cache_grid(value: f32) -> i32 {
+    (value / CACHE_GRID).round() as i32
+}
+
+pub fn path_to_waypoints(
+    geometry: &WorldGeometry,
+    cache: &mut PathCache,
+    start: Vec3,
+    target: Vec3,
+) -> Option<Vec<Vec3>> {
+    let key = (
+        snap_to_cache_grid(start.x),
+        snap_to_cache_grid(start.z),
+        snap_to_cache_grid(target.x),
+        snap_to_cache_grid(target.z),
+    );
+
+    if let Some(cached) = cache.cache.get(&key) {
+        return cached.clone();
+    }
+
+    let result = compute_path(geometry, start, target);
+    cache.cache.insert(key, result.clone());
+    result
+}
+
+fn compute_path(geometry: &WorldGeometry, start: Vec3, target: Vec3) -> Option<Vec<Vec3>> {
     let target = Vec3::new(target.x, start.y, target.z);
     if xz_distance(start, target) < 0.001 {
         return Some(Vec::new());
@@ -143,18 +182,7 @@ fn visibility_graph_a_star(geometry: &WorldGeometry, nodes: &[Vec2]) -> Option<V
 }
 
 fn segment_clear_between_nodes(geometry: &WorldGeometry, from: Vec2, to: Vec2) -> bool {
-    if !geometry.segment_clear_2d(from, to, AGENT_RADIUS) {
-        return false;
-    }
-
-    geometry
-        .obstacles()
-        .iter()
-        .filter(|obstacle| !obstacle.passable)
-        .all(|obstacle| {
-            let polygon = expanded_polygon(&obstacle.polygon, AGENT_RADIUS);
-            !segment_intersects_polygon(from, to, &polygon)
-        })
+    geometry.segment_clear_2d(from, to, AGENT_RADIUS)
 }
 
 fn reconstruct_path(came_from: &[Option<usize>], goal: usize) -> Vec<usize> {
@@ -192,7 +220,8 @@ mod tests {
         let geometry = WorldGeometry::default();
         let target = Vec3::new(4.7, 0.0, 2.2);
 
-        let path = path_to_waypoints(&geometry, Vec3::new(0.2, 0.0, 0.3), target).unwrap();
+        let mut cache = PathCache::default();
+        let path = path_to_waypoints(&geometry, &mut cache, Vec3::new(0.2, 0.0, 0.3), target).unwrap();
 
         assert_eq!(path, vec![target]);
     }
@@ -222,8 +251,10 @@ mod tests {
             false,
         );
 
+        let mut cache = PathCache::default();
         let path = path_to_waypoints(
             &geometry,
+            &mut cache,
             Vec3::new(0.0, 0.0, 0.13),
             Vec3::new(3.2, 0.0, 0.73),
         )
@@ -248,7 +279,8 @@ mod tests {
         );
 
         let target = Vec3::new(2.0, 0.0, 0.0);
-        let path = path_to_waypoints(&geometry, Vec3::ZERO, target).unwrap();
+        let mut cache = PathCache::default();
+        let path = path_to_waypoints(&geometry, &mut cache, Vec3::ZERO, target).unwrap();
 
         assert_eq!(path, vec![target]);
     }

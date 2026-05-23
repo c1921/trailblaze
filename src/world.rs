@@ -234,6 +234,7 @@ fn spawn_colonists(
                 name: format!("Settler {}", index + 1),
                 state: ColonistState::Idle,
                 speed: 2.2,
+                path_rebuild_timer: 0.0,
             },
         ));
     }

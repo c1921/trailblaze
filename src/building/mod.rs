@@ -9,7 +9,7 @@ mod state;
 pub use components::*;
 pub use geometry::WorldGeometry;
 pub use polygon::{
-    expanded_polygon, footprint_polygon, resource_obstacle_polygon, segment_intersects_polygon,
+    expanded_polygon, footprint_polygon, resource_obstacle_polygon,
 };
 pub use state::{BuildState, PlacementIssue};
 
