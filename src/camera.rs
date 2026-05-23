@@ -5,7 +5,8 @@ use bevy::{
     prelude::*,
 };
 
-const GRID_CELLS: u32 = 48;
+use crate::types::{MAP_BUILD_HALF_EXTENT, MAP_GRID_CELLS};
+
 const GRID_SPACING: f32 = 1.0;
 const GRID_AXIS_Y: f32 = 0.02;
 
@@ -35,7 +36,7 @@ impl Default for OrbitCamera {
             pan_sensitivity: 0.0025,
             zoom_sensitivity: 0.14,
             min_radius: 4.0,
-            max_radius: 45.0,
+            max_radius: 90.0,
             min_pitch: 0.18,
             max_pitch: FRAC_PI_2 - 0.08,
         }
@@ -53,12 +54,12 @@ pub fn spawn_camera(commands: &mut Commands) {
 pub fn draw_grid(mut gizmos: Gizmos) {
     gizmos.grid(
         Isometry3d::new(Vec3::Y * GRID_AXIS_Y, Quat::from_rotation_x(FRAC_PI_2)),
-        UVec2::splat(GRID_CELLS),
+        UVec2::splat(MAP_GRID_CELLS),
         Vec2::splat(GRID_SPACING),
         LinearRgba::gray(0.45),
     );
 
-    let half_extent = GRID_CELLS as f32 * GRID_SPACING * 0.5;
+    let half_extent = MAP_GRID_CELLS as f32 * GRID_SPACING * 0.5;
     gizmos.line(
         Vec3::new(-half_extent, GRID_AXIS_Y, 0.0),
         Vec3::new(half_extent, GRID_AXIS_Y, 0.0),
@@ -96,6 +97,14 @@ pub fn control_camera(
 
         let pan_scale = camera.radius * camera.pan_sensitivity;
         camera.focus += (-right * drag_delta.x + forward * drag_delta.y) * pan_scale;
+        camera.focus.x = camera
+            .focus
+            .x
+            .clamp(-MAP_BUILD_HALF_EXTENT, MAP_BUILD_HALF_EXTENT);
+        camera.focus.z = camera
+            .focus
+            .z
+            .clamp(-MAP_BUILD_HALF_EXTENT, MAP_BUILD_HALF_EXTENT);
     }
 
     let scroll_delta = mouse_scroll.delta.y;

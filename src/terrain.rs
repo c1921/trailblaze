@@ -1,0 +1,355 @@
+use bevy::prelude::*;
+
+use crate::types::{CELL_SIZE, MAP_HALF_CELLS, ResourceKind};
+
+pub const DEFAULT_TERRAIN_SEED: u64 = 0x5452_4149_4C42_4C5A;
+pub const TERRAIN_TILE_CELLS: i32 = 4;
+pub const WOOD_NODE_COUNT: usize = 32;
+pub const FOOD_NODE_COUNT: usize = 18;
+pub const WOOD_NODE_AMOUNT: i32 = 24;
+pub const FOOD_NODE_AMOUNT: i32 = 20;
+
+const START_CLEAR_RADIUS: f32 = 8.0;
+const EDGE_MARGIN_CELLS: i32 = 3;
+const MIN_RESOURCE_SPACING: f32 = 2.6;
+const FOREST_THRESHOLD: f32 = 0.57;
+const FORAGE_THRESHOLD: f32 = 0.59;
+const FOREST_SALT: u64 = 0x464F_5245_5354;
+const FORAGE_SALT: u64 = 0x464F_5241_4745;
+const JITTER_SALT: u64 = 0x4A49_5454_4552;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TerrainKind {
+    Grass,
+    ForestFloor,
+    ForageField,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TerrainTile {
+    pub center: Vec3,
+    pub kind: TerrainKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GeneratedResource {
+    pub kind: ResourceKind,
+    pub position: Vec3,
+    pub amount: i32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct GeneratedTerrain {
+    pub tiles: Vec<TerrainTile>,
+    pub resources: Vec<GeneratedResource>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct TerrainGenerationConfig {
+    pub seed: u64,
+    pub half_cells: i32,
+    pub tile_cells: i32,
+    pub wood_nodes: usize,
+    pub food_nodes: usize,
+    pub start_clear_radius: f32,
+    pub edge_margin_cells: i32,
+    pub min_resource_spacing: f32,
+}
+
+impl Default for TerrainGenerationConfig {
+    fn default() -> Self {
+        Self {
+            seed: DEFAULT_TERRAIN_SEED,
+            half_cells: MAP_HALF_CELLS,
+            tile_cells: TERRAIN_TILE_CELLS,
+            wood_nodes: WOOD_NODE_COUNT,
+            food_nodes: FOOD_NODE_COUNT,
+            start_clear_radius: START_CLEAR_RADIUS,
+            edge_margin_cells: EDGE_MARGIN_CELLS,
+            min_resource_spacing: MIN_RESOURCE_SPACING,
+        }
+    }
+}
+
+pub fn generate_terrain(config: TerrainGenerationConfig) -> GeneratedTerrain {
+    let tiles = generate_tiles(config);
+    let mut resources = Vec::with_capacity(config.wood_nodes + config.food_nodes);
+    select_resources(
+        &config,
+        ResourceKind::Wood,
+        config.wood_nodes,
+        &mut resources,
+    );
+    select_resources(
+        &config,
+        ResourceKind::Food,
+        config.food_nodes,
+        &mut resources,
+    );
+
+    GeneratedTerrain { tiles, resources }
+}
+
+fn generate_tiles(config: TerrainGenerationConfig) -> Vec<TerrainTile> {
+    let tile_cells = config.tile_cells.max(1);
+    let tiles_per_axis = (config.half_cells * 2 / tile_cells).max(1);
+    let start = -config.half_cells as f32 * CELL_SIZE;
+    let tile_size = tile_cells as f32 * CELL_SIZE;
+    let mut tiles = Vec::with_capacity((tiles_per_axis * tiles_per_axis) as usize);
+
+    for x in 0..tiles_per_axis {
+        for z in 0..tiles_per_axis {
+            let center = Vec3::new(
+                start + (x as f32 + 0.5) * tile_size,
+                0.0,
+                start + (z as f32 + 0.5) * tile_size,
+            );
+            let (forest, forage) = terrain_scores(config.seed, center.x, center.z);
+            tiles.push(TerrainTile {
+                center,
+                kind: classify_terrain(forest, forage),
+            });
+        }
+    }
+
+    tiles
+}
+
+fn select_resources(
+    config: &TerrainGenerationConfig,
+    kind: ResourceKind,
+    target_count: usize,
+    resources: &mut Vec<GeneratedResource>,
+) {
+    let mut candidates = resource_candidates(config, kind);
+    candidates.sort_by(|left, right| {
+        right
+            .score
+            .total_cmp(&left.score)
+            .then_with(|| left.position.x.total_cmp(&right.position.x))
+            .then_with(|| left.position.z.total_cmp(&right.position.z))
+    });
+
+    for candidate in candidates {
+        if resources.iter().any(|resource| {
+            xz_distance(resource.position, candidate.position) < config.min_resource_spacing
+        }) {
+            continue;
+        }
+
+        resources.push(GeneratedResource {
+            kind,
+            position: candidate.position,
+            amount: resource_amount(kind),
+        });
+        if resources
+            .iter()
+            .filter(|resource| resource.kind == kind)
+            .count()
+            >= target_count
+        {
+            break;
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ResourceCandidate {
+    position: Vec3,
+    score: f32,
+}
+
+fn resource_candidates(
+    config: &TerrainGenerationConfig,
+    kind: ResourceKind,
+) -> Vec<ResourceCandidate> {
+    let limit = (config.half_cells - config.edge_margin_cells).max(0);
+    let mut candidates = Vec::new();
+
+    for x in -limit..=limit {
+        for z in -limit..=limit {
+            let position = Vec3::new(x as f32 * CELL_SIZE, 0.0, z as f32 * CELL_SIZE);
+            if xz_length(position) < config.start_clear_radius {
+                continue;
+            }
+
+            let (forest, forage) = terrain_scores(config.seed, position.x, position.z);
+            let jitter = hash_unit(config.seed, x, z, JITTER_SALT);
+            let score = match kind {
+                ResourceKind::Wood => forest * 0.82 + jitter * 0.18,
+                ResourceKind::Food => {
+                    if forest >= 0.76 {
+                        continue;
+                    }
+                    forage * 0.76 + (1.0 - forest) * 0.14 + jitter * 0.1
+                }
+            };
+            candidates.push(ResourceCandidate { position, score });
+        }
+    }
+
+    candidates
+}
+
+fn resource_amount(kind: ResourceKind) -> i32 {
+    match kind {
+        ResourceKind::Wood => WOOD_NODE_AMOUNT,
+        ResourceKind::Food => FOOD_NODE_AMOUNT,
+    }
+}
+
+fn classify_terrain(forest: f32, forage: f32) -> TerrainKind {
+    if forest >= FOREST_THRESHOLD {
+        TerrainKind::ForestFloor
+    } else if forage >= FORAGE_THRESHOLD {
+        TerrainKind::ForageField
+    } else {
+        TerrainKind::Grass
+    }
+}
+
+fn terrain_scores(seed: u64, x: f32, z: f32) -> (f32, f32) {
+    (
+        fractal_noise(seed, x, z, 0.045, FOREST_SALT),
+        fractal_noise(seed, x + 91.0, z - 37.0, 0.065, FORAGE_SALT),
+    )
+}
+
+fn fractal_noise(seed: u64, x: f32, z: f32, base_frequency: f32, salt: u64) -> f32 {
+    let mut total = 0.0;
+    let mut normalizer = 0.0;
+    let mut amplitude = 1.0;
+    let mut frequency = base_frequency;
+
+    for octave in 0..4 {
+        total += value_noise(
+            seed,
+            x,
+            z,
+            frequency,
+            salt.wrapping_add(octave as u64 * 0x9E37_79B9),
+        ) * amplitude;
+        normalizer += amplitude;
+        amplitude *= 0.5;
+        frequency *= 2.0;
+    }
+
+    total / normalizer
+}
+
+fn value_noise(seed: u64, x: f32, z: f32, frequency: f32, salt: u64) -> f32 {
+    let sample_x = x * frequency;
+    let sample_z = z * frequency;
+    let x0 = sample_x.floor() as i32;
+    let z0 = sample_z.floor() as i32;
+    let tx = smoothstep(sample_x - x0 as f32);
+    let tz = smoothstep(sample_z - z0 as f32);
+
+    let a = lerp(
+        hash_unit(seed, x0, z0, salt),
+        hash_unit(seed, x0 + 1, z0, salt),
+        tx,
+    );
+    let b = lerp(
+        hash_unit(seed, x0, z0 + 1, salt),
+        hash_unit(seed, x0 + 1, z0 + 1, salt),
+        tx,
+    );
+
+    lerp(a, b, tz)
+}
+
+fn hash_unit(seed: u64, x: i32, z: i32, salt: u64) -> f32 {
+    let hash = mix64(
+        seed ^ salt
+            ^ (x as i64 as u64).wrapping_mul(0xA24B_AED4_963E_E407)
+            ^ (z as i64 as u64).wrapping_mul(0x9FB2_1C65_1E98_DF25),
+    );
+    ((hash >> 40) as u32) as f32 / 0x00FF_FFFFu32 as f32
+}
+
+fn mix64(mut value: u64) -> u64 {
+    value ^= value >> 30;
+    value = value.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    value ^= value >> 27;
+    value = value.wrapping_mul(0x94D0_49BB_1331_11EB);
+    value ^ (value >> 31)
+}
+
+fn smoothstep(value: f32) -> f32 {
+    value * value * (3.0 - 2.0 * value)
+}
+
+fn lerp(left: f32, right: f32, amount: f32) -> f32 {
+    left + (right - left) * amount
+}
+
+fn xz_distance(left: Vec3, right: Vec3) -> f32 {
+    Vec2::new(left.x - right.x, left.z - right.z).length()
+}
+
+fn xz_length(position: Vec3) -> f32 {
+    Vec2::new(position.x, position.z).length()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::MAP_BUILD_HALF_EXTENT;
+
+    #[test]
+    fn generated_terrain_is_deterministic_for_same_seed() {
+        let config = TerrainGenerationConfig::default();
+
+        assert_eq!(generate_terrain(config), generate_terrain(config));
+    }
+
+    #[test]
+    fn generated_tiles_cover_expected_overlay_grid() {
+        let terrain = generate_terrain(TerrainGenerationConfig::default());
+
+        assert_eq!(terrain.tiles.len(), 24 * 24);
+    }
+
+    #[test]
+    fn resources_stay_inside_bounds_and_clear_start() {
+        let config = TerrainGenerationConfig::default();
+        let terrain = generate_terrain(config);
+        let edge_limit = (config.half_cells - config.edge_margin_cells) as f32 * CELL_SIZE;
+
+        for resource in &terrain.resources {
+            assert!(resource.position.x.abs() <= MAP_BUILD_HALF_EXTENT);
+            assert!(resource.position.z.abs() <= MAP_BUILD_HALF_EXTENT);
+            assert!(resource.position.x.abs() <= edge_limit);
+            assert!(resource.position.z.abs() <= edge_limit);
+            assert!(xz_length(resource.position) >= config.start_clear_radius);
+        }
+    }
+
+    #[test]
+    fn resources_respect_counts_and_spacing() {
+        let config = TerrainGenerationConfig::default();
+        let terrain = generate_terrain(config);
+        let wood = terrain
+            .resources
+            .iter()
+            .filter(|resource| resource.kind == ResourceKind::Wood)
+            .count();
+        let food = terrain
+            .resources
+            .iter()
+            .filter(|resource| resource.kind == ResourceKind::Food)
+            .count();
+
+        assert!(wood > 0);
+        assert!(wood <= config.wood_nodes);
+        assert!(food > 0);
+        assert!(food <= config.food_nodes);
+
+        for (index, left) in terrain.resources.iter().enumerate() {
+            for right in terrain.resources.iter().skip(index + 1) {
+                assert!(xz_distance(left.position, right.position) >= config.min_resource_spacing);
+            }
+        }
+    }
+}

@@ -4,7 +4,11 @@ use crate::{
     building::{WorldGeometry, resource_obstacle_polygon},
     camera,
     colonist::{Colonist, ColonistState},
-    types::{BuildingKind, ResourceKind, building_color},
+    terrain::{
+        GeneratedResource, GeneratedTerrain, TERRAIN_TILE_CELLS, TerrainGenerationConfig,
+        TerrainKind, generate_terrain,
+    },
+    types::{BuildingKind, CELL_SIZE, MAP_PLANE_SIZE, ResourceKind, building_color},
 };
 
 #[derive(Component)]
@@ -59,6 +63,21 @@ pub fn setup_scene(
     let tree_material = materials.add(Color::srgb(0.16, 0.38, 0.16));
     let food_material = materials.add(Color::srgb(0.66, 0.12, 0.18));
     let colonist_material = materials.add(Color::srgb(0.92, 0.72, 0.45));
+    let grass_material = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.5, 0.57, 0.45),
+        perceptual_roughness: 0.9,
+        ..default()
+    });
+    let forest_floor_material = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.23, 0.35, 0.22),
+        perceptual_roughness: 0.95,
+        ..default()
+    });
+    let forage_field_material = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.38, 0.5, 0.27),
+        perceptual_roughness: 0.9,
+        ..default()
+    });
     let preview_valid_material = materials.add(StandardMaterial {
         base_color: Color::srgba(0.25, 0.85, 0.55, 0.45),
         alpha_mode: AlphaMode::Blend,
@@ -90,7 +109,13 @@ pub fn setup_scene(
     commands.insert_resource(assets);
 
     commands.spawn((
-        Mesh3d(meshes.add(Plane3d::default().mesh().size(50.0, 50.0))),
+        Mesh3d(
+            meshes.add(
+                Plane3d::default()
+                    .mesh()
+                    .size(MAP_PLANE_SIZE, MAP_PLANE_SIZE),
+            ),
+        ),
         MeshMaterial3d(ground_material),
         Ground,
     ));
@@ -104,15 +129,50 @@ pub fn setup_scene(
         Transform::from_xyz(5.0, 8.0, 5.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));
 
+    let terrain = generate_terrain(TerrainGenerationConfig::default());
+    spawn_terrain_tiles(
+        &mut commands,
+        &mut meshes,
+        &grass_material,
+        &forest_floor_material,
+        &forage_field_material,
+        &terrain,
+    );
     spawn_resource_nodes(
         &mut commands,
         &mut geometry,
         &cube_mesh,
         &tree_material,
         &food_material,
+        &terrain.resources,
     );
     spawn_colonists(&mut commands, &colonist_mesh, &colonist_material);
     camera::spawn_camera(&mut commands);
+}
+
+fn spawn_terrain_tiles(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    grass_material: &Handle<StandardMaterial>,
+    forest_floor_material: &Handle<StandardMaterial>,
+    forage_field_material: &Handle<StandardMaterial>,
+    terrain: &GeneratedTerrain,
+) {
+    let tile_size = TERRAIN_TILE_CELLS as f32 * CELL_SIZE;
+    let tile_mesh = meshes.add(Plane3d::default().mesh().size(tile_size, tile_size));
+
+    for tile in &terrain.tiles {
+        let material = match tile.kind {
+            TerrainKind::Grass => grass_material.clone(),
+            TerrainKind::ForestFloor => forest_floor_material.clone(),
+            TerrainKind::ForageField => forage_field_material.clone(),
+        };
+        commands.spawn((
+            Mesh3d(tile_mesh.clone()),
+            MeshMaterial3d(material),
+            Transform::from_translation(Vec3::new(tile.center.x, 0.006, tile.center.z)),
+        ));
+    }
 }
 
 fn spawn_resource_nodes(
@@ -121,45 +181,22 @@ fn spawn_resource_nodes(
     cube_mesh: &Handle<Mesh>,
     tree_material: &Handle<StandardMaterial>,
     food_material: &Handle<StandardMaterial>,
+    resources: &[GeneratedResource],
 ) {
-    let trees = [
-        Vec3::new(-8.0, 0.65, -5.0),
-        Vec3::new(-9.5, 0.65, -3.0),
-        Vec3::new(-7.0, 0.65, -2.0),
-        Vec3::new(6.0, 0.65, -7.0),
-        Vec3::new(8.0, 0.65, -6.0),
-        Vec3::new(9.0, 0.65, -3.5),
-    ];
-    for position in trees {
+    for resource in resources {
+        let (material, y, scale) = match resource.kind {
+            ResourceKind::Wood => (tree_material.clone(), 0.65, Vec3::new(0.8, 1.3, 0.8)),
+            ResourceKind::Food => (food_material.clone(), 0.25, Vec3::new(0.8, 0.5, 0.8)),
+        };
+        let position = Vec3::new(resource.position.x, y, resource.position.z);
         let entity = commands
             .spawn((
                 Mesh3d(cube_mesh.clone()),
-                MeshMaterial3d(tree_material.clone()),
-                Transform::from_translation(position).with_scale(Vec3::new(0.8, 1.3, 0.8)),
+                MeshMaterial3d(material),
+                Transform::from_translation(position).with_scale(scale),
                 ResourceNode {
-                    kind: ResourceKind::Wood,
-                    amount: 24,
-                },
-            ))
-            .id();
-        geometry.occupy_polygon(resource_obstacle_polygon(position), entity, false);
-    }
-
-    let food = [
-        Vec3::new(-5.0, 0.25, 7.0),
-        Vec3::new(-3.5, 0.25, 8.0),
-        Vec3::new(2.5, 0.25, 6.5),
-        Vec3::new(4.0, 0.25, 8.0),
-    ];
-    for position in food {
-        let entity = commands
-            .spawn((
-                Mesh3d(cube_mesh.clone()),
-                MeshMaterial3d(food_material.clone()),
-                Transform::from_translation(position).with_scale(Vec3::new(0.8, 0.5, 0.8)),
-                ResourceNode {
-                    kind: ResourceKind::Food,
-                    amount: 20,
+                    kind: resource.kind,
+                    amount: resource.amount,
                 },
             ))
             .id();

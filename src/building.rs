@@ -3,7 +3,7 @@ use bevy::{prelude::*, window::PrimaryWindow};
 use crate::{
     resources::ResourceStock,
     types::{
-        BUILDING_KINDS, BuildingKind, CELL_SIZE, MAP_HALF_CELLS, ResourceKind,
+        BUILDING_KINDS, BuildingKind, CELL_SIZE, MAP_BUILD_HALF_EXTENT, ResourceKind,
         entrance_local_offset, entrance_world_position, snap_to_grid,
     },
     world::{GameAssets, Ground},
@@ -1110,8 +1110,10 @@ fn cell_center_2d(cell: IVec2) -> Vec2 {
 }
 
 fn within_world_bounds(point: Vec2) -> bool {
-    let half = (MAP_HALF_CELLS as f32 + 0.5) * CELL_SIZE;
-    point.x >= -half && point.x <= half && point.y >= -half && point.y <= half
+    point.x >= -MAP_BUILD_HALF_EXTENT
+        && point.x <= MAP_BUILD_HALF_EXTENT
+        && point.y >= -MAP_BUILD_HALF_EXTENT
+        && point.y <= MAP_BUILD_HALF_EXTENT
 }
 
 #[cfg(test)]
@@ -1129,6 +1131,19 @@ mod tests {
         grid.occupy(&cells, entity, false);
         assert!(!grid.is_area_free(&cells));
         assert_eq!(grid.summary().0, 2);
+    }
+
+    #[test]
+    fn world_bounds_use_expanded_map_extent() {
+        let geometry = WorldGeometry::default();
+
+        assert!(within_map(IVec2::new(
+            crate::types::MAP_HALF_CELLS,
+            crate::types::MAP_HALF_CELLS
+        )));
+        assert!(!within_map(IVec2::new(crate::types::MAP_HALF_CELLS + 1, 0)));
+        assert!(geometry.is_walkable_point(Vec3::new(MAP_BUILD_HALF_EXTENT, 0.0, 0.0)));
+        assert!(!geometry.is_walkable_point(Vec3::new(MAP_BUILD_HALF_EXTENT + 0.01, 0.0, 0.0)));
     }
 
     #[test]

@@ -5,6 +5,7 @@ mod navigation;
 mod resources;
 mod selection;
 mod simulation;
+mod terrain;
 mod types;
 mod ui;
 mod world;
