@@ -2,6 +2,8 @@ use bevy::prelude::*;
 
 pub const CELL_SIZE: f32 = 1.0;
 pub const MAP_HALF_CELLS: i32 = 24;
+pub const ROAD_COST: f32 = 0.5;
+pub const GROUND_COST: f32 = 1.0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum ResourceKind {
@@ -110,6 +112,13 @@ impl BuildingKind {
             Self::Road => "Marks planned paths through the settlement.",
         }
     }
+
+    pub fn entrance_direction(self) -> Option<IVec2> {
+        match self {
+            Self::Road => None,
+            _ => Some(IVec2::NEG_Y),
+        }
+    }
 }
 
 pub fn building_color(kind: BuildingKind) -> Color {
@@ -158,6 +167,33 @@ pub fn footprint_cells(center: IVec2, size: IVec2) -> Vec<IVec2> {
     cells
 }
 
+pub fn rotated_direction(direction: IVec2, rotation_steps: i32) -> IVec2 {
+    match rotation_steps.rem_euclid(4) {
+        0 => direction,
+        1 => IVec2::new(-direction.y, direction.x),
+        2 => -direction,
+        _ => IVec2::new(direction.y, -direction.x),
+    }
+}
+
+pub fn entrance_cell(center: IVec2, size: IVec2, rotation_steps: i32, direction: IVec2) -> IVec2 {
+    let size = rotated_size(size, rotation_steps);
+    let direction = rotated_direction(direction, rotation_steps);
+    let cells = footprint_cells(center, size);
+    let min_x = cells.iter().map(|cell| cell.x).min().unwrap_or(center.x);
+    let max_x = cells.iter().map(|cell| cell.x).max().unwrap_or(center.x);
+    let min_y = cells.iter().map(|cell| cell.y).min().unwrap_or(center.y);
+    let max_y = cells.iter().map(|cell| cell.y).max().unwrap_or(center.y);
+
+    match (direction.x.signum(), direction.y.signum()) {
+        (-1, _) => IVec2::new(min_x - 1, center.y),
+        (1, _) => IVec2::new(max_x + 1, center.y),
+        (_, -1) => IVec2::new(center.x, min_y - 1),
+        (_, 1) => IVec2::new(center.x, max_y + 1),
+        _ => center,
+    }
+}
+
 pub fn within_map(cell: IVec2) -> bool {
     cell.x >= -MAP_HALF_CELLS
         && cell.x <= MAP_HALF_CELLS
@@ -181,5 +217,17 @@ mod tests {
     fn rotation_swaps_rectangular_size() {
         assert_eq!(rotated_size(IVec2::new(3, 2), 1), IVec2::new(2, 3));
         assert_eq!(rotated_size(IVec2::new(3, 2), 2), IVec2::new(3, 2));
+    }
+
+    #[test]
+    fn entrance_cell_tracks_rotation() {
+        let center = IVec2::ZERO;
+        let size = IVec2::new(3, 2);
+        let direction = IVec2::NEG_Y;
+
+        assert_eq!(entrance_cell(center, size, 0, direction), IVec2::new(0, -1));
+        assert_eq!(entrance_cell(center, size, 1, direction), IVec2::new(2, 0));
+        assert_eq!(entrance_cell(center, size, 2, direction), IVec2::new(0, 2));
+        assert_eq!(entrance_cell(center, size, 3, direction), IVec2::new(-1, 0));
     }
 }

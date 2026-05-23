@@ -1,6 +1,7 @@
 mod building;
 mod camera;
 mod colonist;
+mod navigation;
 mod resources;
 mod selection;
 mod simulation;
@@ -35,6 +36,7 @@ fn main() {
                 colonist::update_colonists,
                 building::update_blueprint_visuals,
                 building::finish_blueprints,
+                building::sync_entrance_markers,
                 selection::draw_selection_highlight,
                 ui::update_ui_text,
             ),

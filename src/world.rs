@@ -1,9 +1,10 @@
 use bevy::prelude::*;
 
 use crate::{
+    building::MapGrid,
     camera,
     colonist::{Colonist, ColonistState},
-    types::{BuildingKind, ResourceKind, building_color},
+    types::{BuildingKind, ResourceKind, building_color, world_to_cell},
 };
 
 #[derive(Component)]
@@ -26,6 +27,7 @@ pub struct GameAssets {
     pub woodcutter_material: Handle<StandardMaterial>,
     pub gatherer_material: Handle<StandardMaterial>,
     pub road_material: Handle<StandardMaterial>,
+    pub entrance_material: Handle<StandardMaterial>,
 }
 
 impl GameAssets {
@@ -42,6 +44,7 @@ impl GameAssets {
 
 pub fn setup_scene(
     mut commands: Commands,
+    mut grid: ResMut<MapGrid>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
@@ -82,6 +85,7 @@ pub fn setup_scene(
         woodcutter_material: materials.add(building_color(BuildingKind::Woodcutter)),
         gatherer_material: materials.add(building_color(BuildingKind::Gatherer)),
         road_material: materials.add(building_color(BuildingKind::Road)),
+        entrance_material: materials.add(Color::srgb(0.95, 0.86, 0.28)),
     };
     commands.insert_resource(assets);
 
@@ -100,13 +104,20 @@ pub fn setup_scene(
         Transform::from_xyz(5.0, 8.0, 5.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));
 
-    spawn_resource_nodes(&mut commands, &cube_mesh, &tree_material, &food_material);
+    spawn_resource_nodes(
+        &mut commands,
+        &mut grid,
+        &cube_mesh,
+        &tree_material,
+        &food_material,
+    );
     spawn_colonists(&mut commands, &colonist_mesh, &colonist_material);
     camera::spawn_camera(&mut commands);
 }
 
 fn spawn_resource_nodes(
     commands: &mut Commands,
+    grid: &mut MapGrid,
     cube_mesh: &Handle<Mesh>,
     tree_material: &Handle<StandardMaterial>,
     food_material: &Handle<StandardMaterial>,
@@ -120,15 +131,18 @@ fn spawn_resource_nodes(
         Vec3::new(9.0, 0.65, -3.5),
     ];
     for position in trees {
-        commands.spawn((
-            Mesh3d(cube_mesh.clone()),
-            MeshMaterial3d(tree_material.clone()),
-            Transform::from_translation(position).with_scale(Vec3::new(0.8, 1.3, 0.8)),
-            ResourceNode {
-                kind: ResourceKind::Wood,
-                amount: 24,
-            },
-        ));
+        let entity = commands
+            .spawn((
+                Mesh3d(cube_mesh.clone()),
+                MeshMaterial3d(tree_material.clone()),
+                Transform::from_translation(position).with_scale(Vec3::new(0.8, 1.3, 0.8)),
+                ResourceNode {
+                    kind: ResourceKind::Wood,
+                    amount: 24,
+                },
+            ))
+            .id();
+        grid.occupy(&[world_to_cell(position)], entity, false);
     }
 
     let food = [
@@ -138,15 +152,18 @@ fn spawn_resource_nodes(
         Vec3::new(4.0, 0.25, 8.0),
     ];
     for position in food {
-        commands.spawn((
-            Mesh3d(cube_mesh.clone()),
-            MeshMaterial3d(food_material.clone()),
-            Transform::from_translation(position).with_scale(Vec3::new(0.8, 0.5, 0.8)),
-            ResourceNode {
-                kind: ResourceKind::Food,
-                amount: 20,
-            },
-        ));
+        let entity = commands
+            .spawn((
+                Mesh3d(cube_mesh.clone()),
+                MeshMaterial3d(food_material.clone()),
+                Transform::from_translation(position).with_scale(Vec3::new(0.8, 0.5, 0.8)),
+                ResourceNode {
+                    kind: ResourceKind::Food,
+                    amount: 20,
+                },
+            ))
+            .id();
+        grid.occupy(&[world_to_cell(position)], entity, false);
     }
 }
 
