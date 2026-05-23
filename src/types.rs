@@ -167,12 +167,55 @@ pub fn footprint_cells(center: IVec2, size: IVec2) -> Vec<IVec2> {
     cells
 }
 
+pub fn footprint_cells_rotated(center: IVec2, size: IVec2, angle: f32) -> Vec<IVec2> {
+    if (angle % std::f32::consts::FRAC_PI_2).abs() < 0.001 {
+        return footprint_cells(
+            center,
+            rotated_size(size, (angle / std::f32::consts::FRAC_PI_2).round() as i32),
+        );
+    }
+
+    let cx = center.x as f32 * CELL_SIZE;
+    let cz = center.y as f32 * CELL_SIZE;
+    let hx = size.x as f32 * CELL_SIZE * 0.5;
+    let hz = size.y as f32 * CELL_SIZE * 0.5;
+    let cos = angle.cos();
+    let sin = angle.sin();
+
+    let corners = [(-hx, -hz), (hx, -hz), (hx, hz), (-hx, hz)];
+
+    let mut min_x = f32::MAX;
+    let mut max_x = f32::MIN;
+    let mut min_z = f32::MAX;
+    let mut max_z = f32::MIN;
+
+    for (lx, lz) in corners {
+        let wx = cx + lx * cos + lz * sin;
+        let wz = cz - lx * sin + lz * cos;
+        min_x = min_x.min(wx);
+        max_x = max_x.max(wx);
+        min_z = min_z.min(wz);
+        max_z = max_z.max(wz);
+    }
+
+    let cell_min = world_to_cell(Vec3::new(min_x, 0.0, min_z));
+    let cell_max = world_to_cell(Vec3::new(max_x, 0.0, max_z));
+
+    let mut cells = Vec::new();
+    for x in cell_min.x..=cell_max.x {
+        for y in cell_min.y..=cell_max.y {
+            cells.push(IVec2::new(x, y));
+        }
+    }
+    cells
+}
+
 pub fn rotated_direction(direction: IVec2, rotation_steps: i32) -> IVec2 {
     match rotation_steps.rem_euclid(4) {
         0 => direction,
-        1 => IVec2::new(-direction.y, direction.x),
+        1 => IVec2::new(direction.y, -direction.x),
         2 => -direction,
-        _ => IVec2::new(direction.y, -direction.x),
+        _ => IVec2::new(-direction.y, direction.x),
     }
 }
 
@@ -191,6 +234,23 @@ pub fn entrance_cell(center: IVec2, size: IVec2, rotation_steps: i32, direction:
         (_, -1) => IVec2::new(center.x, min_y - 1),
         (_, 1) => IVec2::new(center.x, max_y + 1),
         _ => center,
+    }
+}
+
+pub fn entrance_world_position(center: Vec3, size: IVec2, angle: f32, direction: IVec2) -> Vec3 {
+    center + Quat::from_rotation_y(angle) * entrance_local_offset(size, direction)
+}
+
+pub fn entrance_local_offset(size: IVec2, direction: IVec2) -> Vec3 {
+    let hx = size.x as f32 * CELL_SIZE * 0.5;
+    let hz = size.y as f32 * CELL_SIZE * 0.5;
+
+    match (direction.x.signum(), direction.y.signum()) {
+        (-1, _) => Vec3::new(-hx, 0.0, 0.0),
+        (1, _) => Vec3::new(hx, 0.0, 0.0),
+        (_, -1) => Vec3::new(0.0, 0.0, -hz),
+        (_, 1) => Vec3::new(0.0, 0.0, hz),
+        _ => Vec3::ZERO,
     }
 }
 
@@ -226,8 +286,60 @@ mod tests {
         let direction = IVec2::NEG_Y;
 
         assert_eq!(entrance_cell(center, size, 0, direction), IVec2::new(0, -1));
-        assert_eq!(entrance_cell(center, size, 1, direction), IVec2::new(2, 0));
+        assert_eq!(entrance_cell(center, size, 1, direction), IVec2::new(-1, 0));
         assert_eq!(entrance_cell(center, size, 2, direction), IVec2::new(0, 2));
-        assert_eq!(entrance_cell(center, size, 3, direction), IVec2::new(-1, 0));
+        assert_eq!(entrance_cell(center, size, 3, direction), IVec2::new(2, 0));
+    }
+
+    #[test]
+    fn entrance_local_offset_uses_unrotated_building_space() {
+        let size = IVec2::new(3, 2);
+
+        assert_eq!(
+            entrance_local_offset(size, IVec2::NEG_Y),
+            Vec3::new(0.0, 0.0, -1.0)
+        );
+        assert_eq!(
+            entrance_local_offset(size, IVec2::X),
+            Vec3::new(1.5, 0.0, 0.0)
+        );
+    }
+
+    #[test]
+    fn entrance_world_position_tracks_bevy_rotation() {
+        let center = Vec3::new(10.0, 0.0, 20.0);
+        let size = IVec2::new(3, 2);
+        let direction = IVec2::NEG_Y;
+
+        assert_vec3_approx_eq(
+            entrance_world_position(center, size, 0.0, direction),
+            Vec3::new(10.0, 0.0, 19.0),
+        );
+        assert_vec3_approx_eq(
+            entrance_world_position(center, size, std::f32::consts::FRAC_PI_2, direction),
+            Vec3::new(9.0, 0.0, 20.0),
+        );
+        assert_vec3_approx_eq(
+            entrance_world_position(center, size, std::f32::consts::PI, direction),
+            Vec3::new(10.0, 0.0, 21.0),
+        );
+        assert_vec3_approx_eq(
+            entrance_world_position(center, size, std::f32::consts::FRAC_PI_2 * 3.0, direction),
+            Vec3::new(11.0, 0.0, 20.0),
+        );
+
+        let angle = 0.37;
+        assert_vec3_approx_eq(
+            entrance_world_position(center, size, angle, direction),
+            center + Vec3::new(-angle.sin(), 0.0, -angle.cos()),
+        );
+    }
+
+    fn assert_vec3_approx_eq(actual: Vec3, expected: Vec3) {
+        let delta = actual - expected;
+        assert!(
+            delta.length() < 0.0001,
+            "expected {expected:?}, got {actual:?}"
+        );
     }
 }

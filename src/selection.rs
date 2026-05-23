@@ -3,6 +3,7 @@ use bevy::{prelude::*, window::PrimaryWindow};
 use crate::{
     building::{Blueprint, BuildState, CompletedBuilding},
     colonist::Colonist,
+    types::{BuildingKind, CELL_SIZE},
     world::{Ground, ResourceNode},
 };
 
@@ -85,8 +86,8 @@ pub fn draw_selection_highlight(
     mut gizmos: Gizmos,
     resource_nodes: Query<(Entity, &Transform), With<ResourceNode>>,
     colonists: Query<(Entity, &Transform), With<Colonist>>,
-    blueprints: Query<(Entity, &Transform), With<Blueprint>>,
-    buildings: Query<(Entity, &Transform), (With<CompletedBuilding>, Without<Blueprint>)>,
+    blueprints: Query<(Entity, &Blueprint, &Transform)>,
+    buildings: Query<(Entity, &CompletedBuilding, &Transform), Without<Blueprint>>,
 ) {
     let Some(selected) = selection.selected else {
         return;
@@ -148,8 +149,8 @@ fn collect_blueprint_hits(
     blueprints: &Query<(Entity, &Blueprint, &Transform)>,
     candidates: &mut Vec<HitCandidate>,
 ) {
-    for (entity, _, transform) in blueprints {
-        if point_in_scaled_box(cursor_world, transform, 0.25) {
+    for (entity, blueprint, transform) in blueprints {
+        if point_in_building_box(cursor_world, transform, blueprint.kind, 0.25) {
             candidates.push(HitCandidate {
                 target: SelectedTarget::Blueprint(entity),
                 distance: xz_distance(cursor_world, transform.translation),
@@ -164,8 +165,8 @@ fn collect_building_hits(
     buildings: &Query<(Entity, &CompletedBuilding, &Transform), Without<Blueprint>>,
     candidates: &mut Vec<HitCandidate>,
 ) {
-    for (entity, _, transform) in buildings {
-        if point_in_scaled_box(cursor_world, transform, 0.25) {
+    for (entity, building, transform) in buildings {
+        if point_in_building_box(cursor_world, transform, building.kind, 0.25) {
             candidates.push(HitCandidate {
                 target: SelectedTarget::Building(entity),
                 distance: xz_distance(cursor_world, transform.translation),
@@ -196,8 +197,8 @@ fn selected_position_and_radius(
     selected: SelectedTarget,
     resource_nodes: &Query<(Entity, &Transform), With<ResourceNode>>,
     colonists: &Query<(Entity, &Transform), With<Colonist>>,
-    blueprints: &Query<(Entity, &Transform), With<Blueprint>>,
-    buildings: &Query<(Entity, &Transform), (With<CompletedBuilding>, Without<Blueprint>)>,
+    blueprints: &Query<(Entity, &Blueprint, &Transform)>,
+    buildings: &Query<(Entity, &CompletedBuilding, &Transform), Without<Blueprint>>,
 ) -> Option<(Vec3, f32)> {
     match selected {
         SelectedTarget::Resource(entity) => resource_nodes
@@ -208,18 +209,21 @@ fn selected_position_and_radius(
             .get(entity)
             .ok()
             .map(|(_, transform)| (transform.translation, 0.45)),
-        SelectedTarget::Blueprint(entity) => blueprints.get(entity).ok().map(|(_, transform)| {
-            (
-                transform.translation,
-                transform.scale.x.max(transform.scale.z) * 0.65,
-            )
-        }),
-        SelectedTarget::Building(entity) => buildings.get(entity).ok().map(|(_, transform)| {
-            (
-                transform.translation,
-                transform.scale.x.max(transform.scale.z) * 0.65,
-            )
-        }),
+        SelectedTarget::Blueprint(entity) => {
+            blueprints
+                .get(entity)
+                .ok()
+                .map(|(_, blueprint, transform)| {
+                    let size = building_visual_size(blueprint.kind);
+                    (transform.translation, size.x.max(size.y) * 0.65)
+                })
+        }
+        SelectedTarget::Building(entity) => {
+            buildings.get(entity).ok().map(|(_, building, transform)| {
+                let size = building_visual_size(building.kind);
+                (transform.translation, size.x.max(size.y) * 0.65)
+            })
+        }
     }
 }
 
@@ -239,12 +243,39 @@ fn cursor_ground_position(
     ray.plane_intersection_point(ground.translation(), InfinitePlane3d::new(ground.up()))
 }
 
-fn point_in_scaled_box(point: Vec3, transform: &Transform, padding: f32) -> bool {
-    let half_x = transform.scale.x.abs() * 0.5 + padding;
-    let half_z = transform.scale.z.abs() * 0.5 + padding;
+fn point_in_building_box(
+    point: Vec3,
+    transform: &Transform,
+    kind: BuildingKind,
+    padding: f32,
+) -> bool {
+    point_in_rotated_box(point, transform, building_visual_size(kind), padding)
+}
 
-    (point.x - transform.translation.x).abs() <= half_x
-        && (point.z - transform.translation.z).abs() <= half_z
+fn point_in_rotated_box(point: Vec3, transform: &Transform, size: Vec2, padding: f32) -> bool {
+    let offset = Vec3::new(
+        point.x - transform.translation.x,
+        0.0,
+        point.z - transform.translation.z,
+    );
+    let local = transform.rotation.inverse() * offset;
+    let half_x = size.x.abs() * 0.5 + padding;
+    let half_z = size.y.abs() * 0.5 + padding;
+
+    local.x.abs() <= half_x && local.z.abs() <= half_z
+}
+
+fn building_visual_size(kind: BuildingKind) -> Vec2 {
+    let definition = kind.definition();
+
+    if kind == BuildingKind::Road {
+        Vec2::splat(CELL_SIZE * 0.95)
+    } else {
+        Vec2::new(
+            definition.size.x as f32 * CELL_SIZE * 0.9,
+            definition.size.y as f32 * CELL_SIZE * 0.9,
+        )
+    }
 }
 
 fn xz_distance(left: Vec3, right: Vec3) -> f32 {
@@ -297,5 +328,27 @@ mod tests {
             best_hit(&[farther, closer]).unwrap().target,
             SelectedTarget::Building(test_entity(2))
         );
+    }
+
+    #[test]
+    fn building_hit_uses_root_rotation_instead_of_scale() {
+        let transform = Transform {
+            translation: Vec3::ZERO,
+            rotation: Quat::from_rotation_y(std::f32::consts::FRAC_PI_2),
+            scale: Vec3::ONE,
+        };
+
+        assert!(point_in_building_box(
+            Vec3::new(0.0, 0.0, -1.2),
+            &transform,
+            BuildingKind::Storage,
+            0.0
+        ));
+        assert!(!point_in_building_box(
+            Vec3::new(1.2, 0.0, 0.0),
+            &transform,
+            BuildingKind::Storage,
+            0.0
+        ));
     }
 }

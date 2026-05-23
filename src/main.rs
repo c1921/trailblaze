@@ -29,6 +29,7 @@ fn main() {
                 camera::draw_grid,
                 ui::handle_ui_buttons,
                 building::handle_build_hotkeys,
+                building::handle_rotation_input,
                 building::update_build_preview,
                 building::place_blueprint,
                 selection::select_target,

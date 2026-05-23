@@ -239,7 +239,7 @@ fn building_interaction_position(
     entrance: Option<&BuildingEntrance>,
 ) -> Vec3 {
     entrance
-        .map(|entrance| cell_to_world(entrance.cell))
+        .map(|entrance| entrance.world_position)
         .unwrap_or(transform.translation)
 }
 

@@ -5,8 +5,9 @@ use bevy::{prelude::*, window::PrimaryWindow};
 use crate::{
     resources::ResourceStock,
     types::{
-        BUILDING_KINDS, BuildingKind, CELL_SIZE, ResourceKind, cell_to_world, entrance_cell,
-        footprint_cells, rotated_size, snap_to_grid, within_map, world_to_cell,
+        BUILDING_KINDS, BuildingKind, CELL_SIZE, ResourceKind, cell_to_world,
+        entrance_local_offset, entrance_world_position, footprint_cells_rotated, snap_to_grid,
+        within_map, world_to_cell,
     },
     world::{GameAssets, Ground},
 };
@@ -15,8 +16,10 @@ use crate::{
 pub struct BuildState {
     pub selected: Option<BuildingKind>,
     pub snap_to_grid: bool,
-    pub rotation_steps: i32,
+    pub rotation_angle: f32,
+    pub r_hold_timer: f32,
     pub preview_entity: Option<Entity>,
+    pub preview_entrance_entity: Option<Entity>,
     pub last_valid: bool,
     pub last_position: Vec3,
     pub last_cells: Vec<IVec2>,
@@ -29,8 +32,10 @@ impl Default for BuildState {
         Self {
             selected: None,
             snap_to_grid: true,
-            rotation_steps: 0,
+            rotation_angle: 0.0,
+            r_hold_timer: 0.0,
             preview_entity: None,
+            preview_entrance_entity: None,
             last_valid: false,
             last_position: Vec3::ZERO,
             last_cells: Vec::new(),
@@ -133,7 +138,9 @@ impl MapGrid {
         }
         match self.occupied.get(&cell) {
             Some(OccupiedCell { passable: true, .. }) => Some(ROAD_COST),
-            Some(OccupiedCell { passable: false, .. }) => None,
+            Some(OccupiedCell {
+                passable: false, ..
+            }) => None,
             None => Some(GROUND_COST),
         }
     }
@@ -162,6 +169,14 @@ impl MapGrid {
 
 #[derive(Component)]
 pub struct BuildPreview;
+
+#[derive(Component)]
+pub struct EntrancePreview;
+
+#[derive(Component, Debug)]
+pub struct BuildingVisual {
+    pub owner: Entity,
+}
 
 #[derive(Component, Debug)]
 pub struct Footprint {
@@ -238,7 +253,8 @@ pub struct CompletedBuilding {
 
 #[derive(Component, Debug, Clone, Copy)]
 pub struct BuildingEntrance {
-    pub cell: IVec2,
+    pub world_position: Vec3,
+    pub local_offset: Vec3,
 }
 
 #[derive(Component, Debug)]
@@ -270,10 +286,6 @@ pub fn handle_build_hotkeys(
         );
     }
 
-    if keyboard.just_pressed(KeyCode::KeyR) {
-        build_state.rotation_steps = (build_state.rotation_steps + 1).rem_euclid(4);
-    }
-
     if keyboard.just_pressed(KeyCode::Escape)
         || (build_state.selected.is_some() && mouse_buttons.just_pressed(MouseButton::Right))
     {
@@ -281,6 +293,43 @@ pub fn handle_build_hotkeys(
         build_state.last_valid = false;
         build_state.invalid_reason = None;
         build_state.status = "Build mode cancelled.".to_string();
+    }
+}
+
+pub fn handle_rotation_input(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    time: Res<Time>,
+    mut build_state: ResMut<BuildState>,
+) {
+    if build_state.selected.is_none() {
+        return;
+    }
+
+    if build_state.snap_to_grid {
+        if keyboard.just_pressed(KeyCode::KeyR) {
+            build_state.rotation_angle = (build_state.rotation_angle + std::f32::consts::FRAC_PI_2)
+                .rem_euclid(std::f32::consts::TAU);
+        }
+    } else {
+        if keyboard.just_pressed(KeyCode::KeyR) {
+            build_state.r_hold_timer = 0.0;
+        }
+        if keyboard.pressed(KeyCode::KeyR) {
+            build_state.r_hold_timer += time.delta_secs();
+            if build_state.r_hold_timer >= 0.2 {
+                build_state.rotation_angle = (build_state.rotation_angle
+                    + std::f32::consts::PI * time.delta_secs())
+                .rem_euclid(std::f32::consts::TAU);
+            }
+        }
+        if keyboard.just_released(KeyCode::KeyR) {
+            if build_state.r_hold_timer > 0.0 && build_state.r_hold_timer < 0.2 {
+                build_state.rotation_angle = (build_state.rotation_angle
+                    + std::f32::consts::FRAC_PI_2)
+                    .rem_euclid(std::f32::consts::TAU);
+            }
+            build_state.r_hold_timer = 0.0;
+        }
     }
 }
 
@@ -293,14 +342,14 @@ pub fn update_build_preview(
     grid: Res<MapGrid>,
     mut build_state: ResMut<BuildState>,
     mut preview_query: Query<
-        (
-            Entity,
-            &mut Transform,
-            &mut MeshMaterial3d<StandardMaterial>,
-            &mut Visibility,
-        ),
-        With<BuildPreview>,
+        (Entity, &mut Transform, &mut Visibility),
+        (With<BuildPreview>, Without<BuildingVisual>),
     >,
+    mut visual_query: Query<(
+        &BuildingVisual,
+        &mut Transform,
+        &mut MeshMaterial3d<StandardMaterial>,
+    )>,
 ) {
     let Some(assets) = assets else {
         return;
@@ -308,35 +357,46 @@ pub fn update_build_preview(
 
     let Some(kind) = build_state.selected else {
         hide_preview(&mut build_state, &mut preview_query);
+        hide_entrance_preview(&mut commands, &mut build_state);
         return;
     };
 
     let Some(cursor_world) = cursor_ground_position(&windows, &camera_query, &ground_query) else {
         hide_preview(&mut build_state, &mut preview_query);
+        hide_entrance_preview(&mut commands, &mut build_state);
         return;
     };
 
     let definition = kind.definition();
-    let size = rotated_size(definition.size, build_state.rotation_steps);
     let position = if build_state.snap_to_grid {
         snap_to_grid(cursor_world)
     } else {
         cursor_world
     };
     let center_cell = world_to_cell(position);
-    let cells = footprint_cells(center_cell, size);
-    let entrance = planned_entrance_cell(kind, center_cell, build_state.rotation_steps);
-    let placement_issue = grid.placement_issue_for(&cells, entrance, kind != BuildingKind::Road);
+    let cells = footprint_cells_rotated(center_cell, definition.size, build_state.rotation_angle);
+    let snapped_position = if build_state.snap_to_grid {
+        cell_to_world(center_cell)
+    } else {
+        position
+    };
+
+    let entrance = planned_entrance(
+        kind,
+        snapped_position,
+        definition.size,
+        build_state.rotation_angle,
+        &cells,
+    );
+    let entrance_cell = entrance.map(|entrance| entrance.cell);
+    let placement_issue =
+        grid.placement_issue_for(&cells, entrance_cell, kind != BuildingKind::Road);
     let valid = placement_issue.is_none();
     let invalid_reason = if valid { None } else { placement_issue };
 
     build_state.last_valid = valid;
     build_state.invalid_reason = invalid_reason;
-    build_state.last_position = if build_state.snap_to_grid {
-        cell_to_world(center_cell)
-    } else {
-        position
-    };
+    build_state.last_position = snapped_position;
     build_state.last_cells = cells;
     let reason_label = invalid_reason
         .map(PlacementIssue::label)
@@ -350,42 +410,69 @@ pub fn update_build_preview(
         format!("Cannot place {}: {}.", definition.label, reason_label)
     };
 
-    let scale = preview_scale(kind, size, definition.height);
-    let translation = preview_translation(build_state.last_position, definition.height);
-    let rotation =
-        Quat::from_rotation_y(build_state.rotation_steps as f32 * std::f32::consts::FRAC_PI_2);
+    let scale = preview_scale(kind, definition.size, definition.height);
+    let rotation = Quat::from_rotation_y(build_state.rotation_angle);
     let material = if valid {
         assets.preview_valid_material.clone()
     } else {
         assets.preview_invalid_material.clone()
     };
 
+    let mut active_preview_entity = None;
     if let Some(entity) = build_state.preview_entity {
-        if let Ok((_, mut transform, mut preview_material, mut visibility)) =
-            preview_query.get_mut(entity)
-        {
-            transform.translation = translation;
+        if let Ok((_, mut transform, mut visibility)) = preview_query.get_mut(entity) {
+            transform.translation = build_state.last_position;
             transform.rotation = rotation;
-            transform.scale = scale;
-            preview_material.0 = material;
+            transform.scale = Vec3::ONE;
             *visibility = Visibility::Visible;
-            return;
+            active_preview_entity = Some(entity);
         }
     }
 
-    let entity = commands
-        .spawn((
-            Mesh3d(assets.cube_mesh.clone()),
-            MeshMaterial3d(material),
-            Transform {
-                translation,
-                rotation,
-                scale,
-            },
-            BuildPreview,
-        ))
-        .id();
-    build_state.preview_entity = Some(entity);
+    let preview_entity = if let Some(entity) = active_preview_entity {
+        entity
+    } else {
+        let entity = commands
+            .spawn((
+                Transform {
+                    translation: build_state.last_position,
+                    rotation,
+                    scale: Vec3::ONE,
+                },
+                Visibility::Visible,
+                BuildPreview,
+            ))
+            .id();
+        build_state.preview_entity = Some(entity);
+        entity
+    };
+
+    sync_building_visual(
+        &mut commands,
+        &assets,
+        preview_entity,
+        material,
+        scale,
+        definition.height,
+        &mut visual_query,
+    );
+
+    hide_entrance_preview(&mut commands, &mut build_state);
+    if valid && kind != BuildingKind::Road {
+        if let Some(entrance) = entrance {
+            let ent_entity = commands
+                .spawn((
+                    Mesh3d(assets.cube_mesh.clone()),
+                    MeshMaterial3d(assets.entrance_material.clone()),
+                    Transform::from_translation(entrance_marker_translation(entrance.local_offset))
+                        .with_scale(Vec3::new(0.42, 0.08, 0.42)),
+                    EntrancePreview,
+                    ChildOf(preview_entity),
+                ))
+                .id();
+            build_state.preview_entrance_entity = Some(ent_entity);
+        }
+    }
 }
 
 pub fn place_blueprint(
@@ -414,16 +501,20 @@ pub fn place_blueprint(
     };
 
     let definition = kind.definition();
-    let size = rotated_size(definition.size, build_state.rotation_steps);
-    let scale = preview_scale(kind, size, definition.height);
-    let translation = preview_translation(build_state.last_position, definition.height);
-    let rotation =
-        Quat::from_rotation_y(build_state.rotation_steps as f32 * std::f32::consts::FRAC_PI_2);
+    let scale = preview_scale(kind, definition.size, definition.height);
+    let rotation = Quat::from_rotation_y(build_state.rotation_angle);
     let passable = kind == BuildingKind::Road;
     let cells = build_state.last_cells.clone();
-    let center_cell = world_to_cell(build_state.last_position);
-    let entrance = planned_entrance_cell(kind, center_cell, build_state.rotation_steps);
-    if let Some(issue) = grid.placement_issue_for(&cells, entrance, kind != BuildingKind::Road) {
+    let entrance = planned_entrance(
+        kind,
+        build_state.last_position,
+        definition.size,
+        build_state.rotation_angle,
+        &cells,
+    );
+    let entrance_cell = entrance.map(|entrance| entrance.cell);
+    if let Some(issue) = grid.placement_issue_for(&cells, entrance_cell, kind != BuildingKind::Road)
+    {
         build_state.status = format!("Cannot place {}: {}.", definition.label, issue.label());
         build_state.last_valid = false;
         build_state.invalid_reason = Some(issue);
@@ -432,13 +523,12 @@ pub fn place_blueprint(
 
     let entity = commands
         .spawn((
-            Mesh3d(assets.cube_mesh.clone()),
-            MeshMaterial3d(assets.blueprint_material.clone()),
             Transform {
-                translation,
+                translation: build_state.last_position,
                 rotation,
-                scale,
+                scale: Vec3::ONE,
             },
+            Visibility::Visible,
             Blueprint {
                 kind,
                 required_wood: definition.wood_cost,
@@ -453,21 +543,37 @@ pub fn place_blueprint(
         ))
         .id();
 
+    spawn_building_visual(
+        &mut commands,
+        &assets,
+        entity,
+        assets.blueprint_material.clone(),
+        scale,
+        definition.height,
+    );
+
     grid.occupy(&cells, entity, passable);
-    if let Some(entrance) = entrance {
-        commands
-            .entity(entity)
-            .insert(BuildingEntrance { cell: entrance });
-        grid.reserve_entrance(entrance, entity);
-        spawn_entrance_marker(&mut commands, &assets, entity, entrance);
+    if let (Some(entrance), Some(ec)) = (entrance, entrance_cell) {
+        commands.entity(entity).insert(BuildingEntrance {
+            world_position: entrance.world_position,
+            local_offset: entrance.local_offset,
+        });
+        grid.reserve_entrance(ec, entity);
+        spawn_entrance_marker(&mut commands, &assets, entity, entrance.local_offset);
     }
     build_state.status = format!("Placed {} blueprint.", definition.label);
     build_state.last_valid = false;
     build_state.invalid_reason = None;
 }
 
-pub fn update_blueprint_visuals(mut blueprints: Query<(&Blueprint, &mut Transform)>) {
-    for (blueprint, mut transform) in &mut blueprints {
+pub fn update_blueprint_visuals(
+    blueprints: Query<&Blueprint>,
+    mut visuals: Query<(&BuildingVisual, &mut Transform)>,
+) {
+    for (visual, mut transform) in &mut visuals {
+        let Ok(blueprint) = blueprints.get(visual.owner) else {
+            continue;
+        };
         let height = blueprint.kind.definition().height;
         let visual_height = (height * (0.35 + blueprint.progress_ratio() * 0.65)).max(0.04);
         transform.scale.y = visual_height;
@@ -479,23 +585,24 @@ pub fn finish_blueprints(
     mut commands: Commands,
     assets: Option<Res<GameAssets>>,
     mut stock: ResMut<ResourceStock>,
-    mut blueprint_query: Query<(
-        Entity,
-        &Blueprint,
-        &mut MeshMaterial3d<StandardMaterial>,
-        Option<&Footprint>,
-    )>,
+    blueprint_query: Query<(Entity, &Blueprint, Option<&Footprint>)>,
+    mut visuals: Query<(&BuildingVisual, &mut MeshMaterial3d<StandardMaterial>)>,
 ) {
     let Some(assets) = assets else {
         return;
     };
 
-    for (entity, blueprint, mut material, footprint) in &mut blueprint_query {
+    for (entity, blueprint, footprint) in &blueprint_query {
         if !blueprint.is_complete() {
             continue;
         }
 
-        material.0 = assets.building_material(blueprint.kind);
+        for (visual, mut material) in &mut visuals {
+            if visual.owner == entity {
+                material.0 = assets.building_material(blueprint.kind);
+                break;
+            }
+        }
         if blueprint.kind == BuildingKind::Storage {
             stock.add(ResourceKind::Wood, 4);
         }
@@ -520,7 +627,7 @@ pub fn sync_entrance_markers(
 ) {
     for (marker, mut transform) in &mut markers {
         if let Ok(entrance) = entrances.get(marker.owner) {
-            transform.translation = entrance_marker_translation(entrance.cell);
+            transform.translation = entrance_marker_translation(entrance.local_offset);
         }
     }
 }
@@ -528,21 +635,22 @@ pub fn sync_entrance_markers(
 fn hide_preview(
     build_state: &mut BuildState,
     preview_query: &mut Query<
-        (
-            Entity,
-            &mut Transform,
-            &mut MeshMaterial3d<StandardMaterial>,
-            &mut Visibility,
-        ),
-        With<BuildPreview>,
+        (Entity, &mut Transform, &mut Visibility),
+        (With<BuildPreview>, Without<BuildingVisual>),
     >,
 ) {
     build_state.invalid_reason = None;
     build_state.last_valid = false;
     if let Some(entity) = build_state.preview_entity {
-        if let Ok((_, _, _, mut visibility)) = preview_query.get_mut(entity) {
+        if let Ok((_, _, mut visibility)) = preview_query.get_mut(entity) {
             *visibility = Visibility::Hidden;
         }
+    }
+}
+
+fn hide_entrance_preview(commands: &mut Commands, build_state: &mut BuildState) {
+    if let Some(entity) = build_state.preview_entrance_entity.take() {
+        commands.entity(entity).despawn();
     }
 }
 
@@ -574,38 +682,131 @@ fn preview_scale(kind: BuildingKind, size: IVec2, height: f32) -> Vec3 {
     }
 }
 
-fn preview_translation(position: Vec3, height: f32) -> Vec3 {
-    Vec3::new(position.x, height * 0.5, position.z)
+fn visual_translation(height: f32) -> Vec3 {
+    Vec3::new(0.0, height * 0.5, 0.0)
 }
 
-fn planned_entrance_cell(
+#[derive(Clone, Copy, Debug)]
+struct PlannedEntrance {
+    world_position: Vec3,
+    local_offset: Vec3,
+    cell: IVec2,
+}
+
+fn planned_entrance(
     kind: BuildingKind,
-    center_cell: IVec2,
-    rotation_steps: i32,
-) -> Option<IVec2> {
+    building_center: Vec3,
+    size: IVec2,
+    rotation_angle: f32,
+    footprint_cells: &[IVec2],
+) -> Option<PlannedEntrance> {
     kind.entrance_direction().map(|direction| {
-        entrance_cell(
-            center_cell,
-            kind.definition().size,
-            rotation_steps,
-            direction,
-        )
+        let local_offset = entrance_local_offset(size, direction);
+        let visual_world_position =
+            entrance_world_position(building_center, size, rotation_angle, direction);
+        let mut cell = world_to_cell(visual_world_position);
+        let step = rotated_entrance_step(direction, rotation_angle);
+        while footprint_cells.contains(&cell) {
+            cell += step;
+        }
+
+        PlannedEntrance {
+            world_position: cell_to_world(cell),
+            local_offset,
+            cell,
+        }
     })
 }
 
-fn spawn_entrance_marker(commands: &mut Commands, assets: &GameAssets, owner: Entity, cell: IVec2) {
+fn rotated_entrance_step(direction: IVec2, rotation_angle: f32) -> IVec2 {
+    let local_direction = Vec3::new(direction.x as f32, 0.0, direction.y as f32);
+    let rotated_direction = Quat::from_rotation_y(rotation_angle) * local_direction;
+    let step = IVec2::new(
+        rotated_axis_step(rotated_direction.x),
+        rotated_axis_step(rotated_direction.z),
+    );
+
+    if step != IVec2::ZERO {
+        return step;
+    }
+
+    if rotated_direction.x.abs() >= rotated_direction.z.abs() {
+        IVec2::new(rotated_direction.x.signum() as i32, 0)
+    } else {
+        IVec2::new(0, rotated_direction.z.signum() as i32)
+    }
+}
+
+fn rotated_axis_step(value: f32) -> i32 {
+    if value > 0.333 {
+        1
+    } else if value < -0.333 {
+        -1
+    } else {
+        0
+    }
+}
+
+fn sync_building_visual(
+    commands: &mut Commands,
+    assets: &GameAssets,
+    owner: Entity,
+    material: Handle<StandardMaterial>,
+    scale: Vec3,
+    height: f32,
+    visuals: &mut Query<(
+        &BuildingVisual,
+        &mut Transform,
+        &mut MeshMaterial3d<StandardMaterial>,
+    )>,
+) {
+    for (visual, mut transform, mut visual_material) in visuals.iter_mut() {
+        if visual.owner == owner {
+            transform.translation = visual_translation(height);
+            transform.scale = scale;
+            visual_material.0 = material;
+            return;
+        }
+    }
+
+    spawn_building_visual(commands, assets, owner, material, scale, height);
+}
+
+fn spawn_building_visual(
+    commands: &mut Commands,
+    assets: &GameAssets,
+    owner: Entity,
+    material: Handle<StandardMaterial>,
+    scale: Vec3,
+    height: f32,
+) {
     commands.spawn((
         Mesh3d(assets.cube_mesh.clone()),
-        MeshMaterial3d(assets.entrance_material.clone()),
-        Transform::from_translation(entrance_marker_translation(cell))
-            .with_scale(Vec3::new(0.42, 0.08, 0.42)),
-        EntranceMarker { owner },
+        MeshMaterial3d(material),
+        Transform::from_translation(visual_translation(height)).with_scale(scale),
+        BuildingVisual { owner },
+        ChildOf(owner),
     ));
 }
 
-fn entrance_marker_translation(cell: IVec2) -> Vec3 {
-    let position = cell_to_world(cell);
-    Vec3::new(position.x, 0.04, position.z)
+fn spawn_entrance_marker(
+    commands: &mut Commands,
+    assets: &GameAssets,
+    owner: Entity,
+    local_offset: Vec3,
+) {
+    commands.spawn((
+        Mesh3d(assets.cube_mesh.clone()),
+        MeshMaterial3d(assets.entrance_material.clone()),
+        Transform::from_translation(entrance_marker_translation(local_offset))
+            .with_scale(Vec3::new(0.42, 0.08, 0.42)),
+        EntranceMarker { owner },
+        ChildOf(owner),
+    ));
+}
+
+fn entrance_marker_translation(local_offset: Vec3) -> Vec3 {
+    Vec3::new(local_offset.x, 0.04, local_offset.z)
 }
 
 #[cfg(test)]
@@ -738,5 +939,81 @@ mod tests {
             grid.placement_issue_for(&[IVec2::ZERO], Some(IVec2::new(0, -1)), true),
             Some(PlacementIssue::EntranceBlocked)
         );
+    }
+
+    #[test]
+    fn planned_entrance_uses_grid_center_for_navigation_target() {
+        let building_center = Vec3::new(1.37, 0.0, -2.22);
+        let rotation_angle = 0.37;
+        let definition = BuildingKind::Storage.definition();
+        let footprint_cells = footprint_cells_rotated(
+            world_to_cell(building_center),
+            definition.size,
+            rotation_angle,
+        );
+
+        let entrance = planned_entrance(
+            BuildingKind::Storage,
+            building_center,
+            definition.size,
+            rotation_angle,
+            &footprint_cells,
+        )
+        .unwrap();
+        let visual_world_position = entrance_world_position(
+            building_center,
+            definition.size,
+            rotation_angle,
+            BuildingKind::Storage.entrance_direction().unwrap(),
+        );
+        let raw_cell = world_to_cell(visual_world_position);
+
+        if footprint_cells.contains(&raw_cell) {
+            assert_ne!(entrance.cell, raw_cell);
+        } else {
+            assert_eq!(entrance.cell, raw_cell);
+        }
+        assert!(!footprint_cells.contains(&entrance.cell));
+        assert_eq!(entrance.world_position, cell_to_world(entrance.cell));
+        assert_eq!(
+            entrance.local_offset,
+            entrance_local_offset(
+                definition.size,
+                BuildingKind::Storage.entrance_direction().unwrap()
+            )
+        );
+    }
+
+    #[test]
+    fn planned_entrance_moves_navigation_cell_outside_rotated_footprint() {
+        let building_center = Vec3::new(1.37, 0.0, -2.22);
+        let rotation_angle = 0.37;
+        let definition = BuildingKind::Storage.definition();
+        let footprint_cells = footprint_cells_rotated(
+            world_to_cell(building_center),
+            definition.size,
+            rotation_angle,
+        );
+        let entity = Entity::from_raw_u32(1).unwrap();
+        let mut grid = MapGrid::default();
+
+        let entrance = planned_entrance(
+            BuildingKind::Storage,
+            building_center,
+            definition.size,
+            rotation_angle,
+            &footprint_cells,
+        )
+        .unwrap();
+        grid.occupy(&footprint_cells, entity, false);
+
+        assert!(!footprint_cells.contains(&entrance.cell));
+        assert!(grid.is_walkable(entrance.cell));
+        assert!(crate::navigation::path_to_waypoints(
+            &grid,
+            Vec3::new(-1.2, 0.0, 1.0),
+            entrance.world_position,
+        )
+        .is_some());
     }
 }
