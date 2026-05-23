@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 
 use crate::{
-    building::{Blueprint, BuildState, CompletedBuilding, MapGrid},
+    building::{Blueprint, BuildState, CompletedBuilding, WorldGeometry},
     colonist::Colonist,
     resources::ResourceStock,
     selection::{SelectedTarget, SelectionState},
@@ -200,7 +200,7 @@ pub fn update_ui_text(
     stock: Res<ResourceStock>,
     clock: Res<SimulationClock>,
     build_state: Res<BuildState>,
-    grid: Res<MapGrid>,
+    geometry: Res<WorldGeometry>,
     selection: Res<SelectionState>,
     colonists: Query<(Entity, &Colonist)>,
     completed: Query<(Entity, &CompletedBuilding)>,
@@ -222,7 +222,7 @@ pub fn update_ui_text(
         .iter()
         .filter(|(_, colonist)| matches!(colonist.state, crate::colonist::ColonistState::Idle))
         .count();
-    let (occupied_cells, road_cells, _) = grid.summary();
+    let (obstacles, road_obstacles, _) = geometry.summary();
 
     if let Ok(mut text) = text_queries.p0().single_mut() {
         text.0 = format!(
@@ -240,10 +240,10 @@ pub fn update_ui_text(
 
     if let Ok(mut text) = text_queries.p1().single_mut() {
         text.0 = format!(
-            "{}  Cells: {}  Roads: {}  Snap: {}",
+            "{}  Obstacles: {}  Roads: {}  Snap: {}",
             build_state.status,
-            occupied_cells,
-            road_cells,
+            obstacles,
+            road_obstacles,
             if build_state.snap_to_grid {
                 "On"
             } else {

@@ -2,8 +2,6 @@ use bevy::prelude::*;
 
 pub const CELL_SIZE: f32 = 1.0;
 pub const MAP_HALF_CELLS: i32 = 24;
-pub const ROAD_COST: f32 = 0.5;
-pub const GROUND_COST: f32 = 1.0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum ResourceKind {
@@ -146,6 +144,7 @@ pub fn snap_to_grid(position: Vec3) -> Vec3 {
     cell_to_world(world_to_cell(position))
 }
 
+#[cfg(test)]
 pub fn rotated_size(size: IVec2, rotation_steps: i32) -> IVec2 {
     if rotation_steps.rem_euclid(2) == 0 {
         size
@@ -154,6 +153,7 @@ pub fn rotated_size(size: IVec2, rotation_steps: i32) -> IVec2 {
     }
 }
 
+#[cfg(test)]
 pub fn footprint_cells(center: IVec2, size: IVec2) -> Vec<IVec2> {
     let start = center - IVec2::new((size.x - 1) / 2, (size.y - 1) / 2);
     let mut cells = Vec::with_capacity((size.x * size.y) as usize);
@@ -167,49 +167,7 @@ pub fn footprint_cells(center: IVec2, size: IVec2) -> Vec<IVec2> {
     cells
 }
 
-pub fn footprint_cells_rotated(center: IVec2, size: IVec2, angle: f32) -> Vec<IVec2> {
-    if (angle % std::f32::consts::FRAC_PI_2).abs() < 0.001 {
-        return footprint_cells(
-            center,
-            rotated_size(size, (angle / std::f32::consts::FRAC_PI_2).round() as i32),
-        );
-    }
-
-    let cx = center.x as f32 * CELL_SIZE;
-    let cz = center.y as f32 * CELL_SIZE;
-    let hx = size.x as f32 * CELL_SIZE * 0.5;
-    let hz = size.y as f32 * CELL_SIZE * 0.5;
-    let cos = angle.cos();
-    let sin = angle.sin();
-
-    let corners = [(-hx, -hz), (hx, -hz), (hx, hz), (-hx, hz)];
-
-    let mut min_x = f32::MAX;
-    let mut max_x = f32::MIN;
-    let mut min_z = f32::MAX;
-    let mut max_z = f32::MIN;
-
-    for (lx, lz) in corners {
-        let wx = cx + lx * cos + lz * sin;
-        let wz = cz - lx * sin + lz * cos;
-        min_x = min_x.min(wx);
-        max_x = max_x.max(wx);
-        min_z = min_z.min(wz);
-        max_z = max_z.max(wz);
-    }
-
-    let cell_min = world_to_cell(Vec3::new(min_x, 0.0, min_z));
-    let cell_max = world_to_cell(Vec3::new(max_x, 0.0, max_z));
-
-    let mut cells = Vec::new();
-    for x in cell_min.x..=cell_max.x {
-        for y in cell_min.y..=cell_max.y {
-            cells.push(IVec2::new(x, y));
-        }
-    }
-    cells
-}
-
+#[cfg(test)]
 pub fn rotated_direction(direction: IVec2, rotation_steps: i32) -> IVec2 {
     match rotation_steps.rem_euclid(4) {
         0 => direction,
@@ -219,6 +177,7 @@ pub fn rotated_direction(direction: IVec2, rotation_steps: i32) -> IVec2 {
     }
 }
 
+#[cfg(test)]
 pub fn entrance_cell(center: IVec2, size: IVec2, rotation_steps: i32, direction: IVec2) -> IVec2 {
     let size = rotated_size(size, rotation_steps);
     let direction = rotated_direction(direction, rotation_steps);
@@ -254,6 +213,7 @@ pub fn entrance_local_offset(size: IVec2, direction: IVec2) -> Vec3 {
     }
 }
 
+#[cfg(test)]
 pub fn within_map(cell: IVec2) -> bool {
     cell.x >= -MAP_HALF_CELLS
         && cell.x <= MAP_HALF_CELLS

@@ -1,10 +1,10 @@
 use bevy::prelude::*;
 
 use crate::{
-    building::MapGrid,
+    building::{WorldGeometry, resource_obstacle_polygon},
     camera,
     colonist::{Colonist, ColonistState},
-    types::{BuildingKind, ResourceKind, building_color, world_to_cell},
+    types::{BuildingKind, ResourceKind, building_color},
 };
 
 #[derive(Component)]
@@ -44,7 +44,7 @@ impl GameAssets {
 
 pub fn setup_scene(
     mut commands: Commands,
-    mut grid: ResMut<MapGrid>,
+    mut geometry: ResMut<WorldGeometry>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
@@ -106,7 +106,7 @@ pub fn setup_scene(
 
     spawn_resource_nodes(
         &mut commands,
-        &mut grid,
+        &mut geometry,
         &cube_mesh,
         &tree_material,
         &food_material,
@@ -117,7 +117,7 @@ pub fn setup_scene(
 
 fn spawn_resource_nodes(
     commands: &mut Commands,
-    grid: &mut MapGrid,
+    geometry: &mut WorldGeometry,
     cube_mesh: &Handle<Mesh>,
     tree_material: &Handle<StandardMaterial>,
     food_material: &Handle<StandardMaterial>,
@@ -142,7 +142,7 @@ fn spawn_resource_nodes(
                 },
             ))
             .id();
-        grid.occupy(&[world_to_cell(position)], entity, false);
+        geometry.occupy_polygon(resource_obstacle_polygon(position), entity, false);
     }
 
     let food = [
@@ -163,7 +163,7 @@ fn spawn_resource_nodes(
                 },
             ))
             .id();
-        grid.occupy(&[world_to_cell(position)], entity, false);
+        geometry.occupy_polygon(resource_obstacle_polygon(position), entity, false);
     }
 }
 

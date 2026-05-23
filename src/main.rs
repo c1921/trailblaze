@@ -17,7 +17,7 @@ fn main() {
         .init_resource::<resources::ResourceStock>()
         .init_resource::<simulation::SimulationClock>()
         .init_resource::<building::BuildState>()
-        .init_resource::<building::MapGrid>()
+        .init_resource::<building::WorldGeometry>()
         .init_resource::<selection::SelectionState>()
         .add_plugins(DefaultPlugins)
         .add_systems(Startup, (world::setup_scene, ui::spawn_ui).chain())

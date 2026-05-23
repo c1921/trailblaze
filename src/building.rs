@@ -1,16 +1,21 @@
-use std::collections::HashMap;
-
 use bevy::{prelude::*, window::PrimaryWindow};
 
 use crate::{
     resources::ResourceStock,
     types::{
-        BUILDING_KINDS, BuildingKind, CELL_SIZE, ResourceKind, cell_to_world,
-        entrance_local_offset, entrance_world_position, footprint_cells_rotated, snap_to_grid,
-        within_map, world_to_cell,
+        BUILDING_KINDS, BuildingKind, CELL_SIZE, MAP_HALF_CELLS, ResourceKind,
+        entrance_local_offset, entrance_world_position, snap_to_grid,
     },
     world::{GameAssets, Ground},
 };
+
+#[cfg(test)]
+use crate::types::within_map;
+
+const FOOTPRINT_SCALE: f32 = 0.9;
+const ROAD_FOOTPRINT_SCALE: f32 = 0.95;
+const ENTRANCE_RESERVATION_RADIUS: f32 = 0.35;
+const GEOMETRY_EPSILON: f32 = 0.0001;
 
 #[derive(Resource, Debug)]
 pub struct BuildState {
@@ -22,7 +27,7 @@ pub struct BuildState {
     pub preview_entrance_entity: Option<Entity>,
     pub last_valid: bool,
     pub last_position: Vec3,
-    pub last_cells: Vec<IVec2>,
+    pub last_polygon: Vec<Vec2>,
     pub invalid_reason: Option<PlacementIssue>,
     pub status: String,
 }
@@ -38,7 +43,7 @@ impl Default for BuildState {
             preview_entrance_entity: None,
             last_valid: false,
             last_position: Vec3::ZERO,
-            last_cells: Vec::new(),
+            last_polygon: Vec::new(),
             invalid_reason: None,
             status: "Select a building to start planning.".to_string(),
         }
@@ -62,27 +67,40 @@ impl PlacementIssue {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct OccupiedCell {
+#[derive(Clone, Debug)]
+pub struct Obstacle {
     pub entity: Entity,
+    pub polygon: Vec<Vec2>,
     pub passable: bool,
 }
 
-#[derive(Resource, Debug, Default)]
-pub struct MapGrid {
-    occupied: HashMap<IVec2, OccupiedCell>,
-    reserved_entrances: HashMap<IVec2, Entity>,
+#[derive(Clone, Copy, Debug)]
+pub struct ReservedEntrance {
+    pub entity: Entity,
+    pub position: Vec2,
 }
 
-impl MapGrid {
+#[derive(Resource, Debug, Default)]
+pub struct WorldGeometry {
+    obstacles: Vec<Obstacle>,
+    reserved_entrances: Vec<ReservedEntrance>,
+}
+
+#[cfg(test)]
+pub type MapGrid = WorldGeometry;
+
+impl WorldGeometry {
+    #[cfg(test)]
     pub fn is_area_free(&self, cells: &[IVec2]) -> bool {
         self.placement_issue(cells).is_none()
     }
 
+    #[cfg(test)]
     pub fn placement_issue(&self, cells: &[IVec2]) -> Option<PlacementIssue> {
         self.placement_issue_for(cells, None, true)
     }
 
+    #[cfg(test)]
     pub fn placement_issue_for(
         &self,
         cells: &[IVec2],
@@ -92,13 +110,20 @@ impl MapGrid {
         if cells.iter().any(|cell| !within_map(*cell)) {
             return Some(PlacementIssue::OutOfBounds);
         }
-        if cells.iter().any(|cell| self.occupied.contains_key(cell)) {
+        if cells.iter().any(|cell| {
+            let polygon = cell_polygon(*cell);
+            self.obstacles
+                .iter()
+                .any(|obstacle| polygons_intersect(&polygon, &obstacle.polygon))
+        }) {
             return Some(PlacementIssue::Occupied);
         }
         if block_reserved_entrances
-            && cells
-                .iter()
-                .any(|cell| self.reserved_entrances.contains_key(cell))
+            && cells.iter().any(|cell| {
+                self.reserved_entrances
+                    .iter()
+                    .any(|reserved| reserved.position == cell_center_2d(*cell))
+            })
         {
             return Some(PlacementIssue::Occupied);
         }
@@ -106,7 +131,12 @@ impl MapGrid {
             if !within_map(entrance) {
                 return Some(PlacementIssue::OutOfBounds);
             }
-            if !self.is_walkable(entrance) || self.reserved_entrances.contains_key(&entrance) {
+            let entrance_position = cell_center_2d(entrance);
+            if !self.is_walkable(entrance)
+                || self.reserved_entrances.iter().any(|reserved| {
+                    reserved.position.distance(entrance_position) <= ENTRANCE_RESERVATION_RADIUS
+                })
+            {
                 return Some(PlacementIssue::EntranceBlocked);
             }
         }
@@ -114,56 +144,136 @@ impl MapGrid {
         None
     }
 
-    pub fn occupy(&mut self, cells: &[IVec2], entity: Entity, passable: bool) {
-        for cell in cells {
-            self.occupied
-                .insert(*cell, OccupiedCell { entity, passable });
+    pub fn placement_issue_for_polygon(
+        &self,
+        polygon: &[Vec2],
+        entrance: Option<Vec3>,
+        block_reserved_entrances: bool,
+    ) -> Option<PlacementIssue> {
+        if polygon.iter().any(|point| !within_world_bounds(*point)) {
+            return Some(PlacementIssue::OutOfBounds);
         }
-    }
-
-    pub fn reserve_entrance(&mut self, cell: IVec2, entity: Entity) {
-        self.reserved_entrances.insert(cell, entity);
-    }
-
-    pub fn release_entity(&mut self, entity: Entity) {
-        self.occupied.retain(|_, cell| cell.entity != entity);
-        self.reserved_entrances
-            .retain(|_, reserved_entity| *reserved_entity != entity);
-    }
-
-    pub fn movement_cost(&self, cell: IVec2) -> Option<f32> {
-        use crate::types::{GROUND_COST, ROAD_COST};
-        if !within_map(cell) {
-            return None;
+        if self
+            .obstacles
+            .iter()
+            .any(|obstacle| polygons_intersect(polygon, &obstacle.polygon))
+        {
+            return Some(PlacementIssue::Occupied);
         }
-        match self.occupied.get(&cell) {
-            Some(OccupiedCell { passable: true, .. }) => Some(ROAD_COST),
-            Some(OccupiedCell {
-                passable: false, ..
-            }) => None,
-            None => Some(GROUND_COST),
+        if block_reserved_entrances
+            && self.reserved_entrances.iter().any(|reserved| {
+                point_in_polygon(reserved.position, polygon)
+                    || distance_to_polygon(reserved.position, polygon)
+                        <= ENTRANCE_RESERVATION_RADIUS
+            })
+        {
+            return Some(PlacementIssue::Occupied);
         }
-    }
 
-    pub fn is_walkable(&self, cell: IVec2) -> bool {
-        within_map(cell)
-            && self
-                .occupied
-                .get(&cell)
-                .map(|cell| cell.passable)
-                .unwrap_or(true)
-    }
-
-    pub fn summary(&self) -> (usize, usize, usize) {
-        let road_cells = self.occupied.values().filter(|cell| cell.passable).count();
-        let mut entities = Vec::new();
-        for cell in self.occupied.values() {
-            if !entities.contains(&cell.entity) {
-                entities.push(cell.entity);
+        if let Some(entrance) = entrance {
+            let entrance = xz(entrance);
+            if !within_world_bounds(entrance) {
+                return Some(PlacementIssue::OutOfBounds);
+            }
+            if !self.is_walkable_point_2d(entrance)
+                || self.reserved_entrances.iter().any(|reserved| {
+                    reserved.position.distance(entrance) <= ENTRANCE_RESERVATION_RADIUS
+                })
+            {
+                return Some(PlacementIssue::EntranceBlocked);
             }
         }
 
-        (self.occupied.len(), road_cells, entities.len())
+        None
+    }
+
+    #[cfg(test)]
+    pub fn occupy(&mut self, cells: &[IVec2], entity: Entity, passable: bool) {
+        for cell in cells {
+            self.occupy_polygon(cell_polygon(*cell), entity, passable);
+        }
+    }
+
+    pub fn occupy_polygon(&mut self, polygon: Vec<Vec2>, entity: Entity, passable: bool) {
+        self.obstacles.push(Obstacle {
+            entity,
+            polygon,
+            passable,
+        });
+    }
+
+    #[cfg(test)]
+    pub fn reserve_entrance(&mut self, cell: IVec2, entity: Entity) {
+        self.reserve_entrance_point_2d(cell_center_2d(cell), entity);
+    }
+
+    pub fn reserve_entrance_point(&mut self, position: Vec3, entity: Entity) {
+        self.reserve_entrance_point_2d(xz(position), entity);
+    }
+
+    pub fn reserve_entrance_point_2d(&mut self, position: Vec2, entity: Entity) {
+        self.reserved_entrances
+            .push(ReservedEntrance { entity, position });
+    }
+
+    pub fn release_entity(&mut self, entity: Entity) {
+        self.obstacles.retain(|obstacle| obstacle.entity != entity);
+        self.reserved_entrances
+            .retain(|reserved| reserved.entity != entity);
+    }
+
+    #[cfg(test)]
+    pub fn is_walkable(&self, cell: IVec2) -> bool {
+        within_map(cell) && self.is_walkable_point_2d(cell_center_2d(cell))
+    }
+
+    pub fn is_walkable_point(&self, point: Vec3) -> bool {
+        self.is_walkable_point_2d(xz(point))
+    }
+
+    pub fn is_walkable_point_2d(&self, point: Vec2) -> bool {
+        within_world_bounds(point)
+            && self
+                .obstacles
+                .iter()
+                .filter(|obstacle| !obstacle.passable)
+                .all(|obstacle| !point_in_polygon(point, &obstacle.polygon))
+    }
+
+    pub fn obstacles(&self) -> &[Obstacle] {
+        &self.obstacles
+    }
+
+    pub fn segment_clear(&self, from: Vec3, to: Vec3, padding: f32) -> bool {
+        self.segment_clear_2d(xz(from), xz(to), padding)
+    }
+
+    pub fn segment_clear_2d(&self, from: Vec2, to: Vec2, padding: f32) -> bool {
+        if !within_world_bounds(from) || !within_world_bounds(to) {
+            return false;
+        }
+
+        self.obstacles
+            .iter()
+            .filter(|obstacle| !obstacle.passable)
+            .all(|obstacle| {
+                let polygon = expanded_polygon(&obstacle.polygon, padding);
+                !segment_intersects_polygon(from, to, &polygon)
+                    && !point_in_polygon(from, &polygon)
+                    && !point_in_polygon(to, &polygon)
+            })
+    }
+
+    pub fn summary(&self) -> (usize, usize, usize) {
+        let road_cells = self.obstacles.iter().filter(|cell| cell.passable).count();
+        let mut entities = Vec::new();
+        for obstacle in &self.obstacles {
+            if !entities.contains(&obstacle.entity) {
+                entities.push(obstacle.entity);
+            }
+        }
+
+        (self.obstacles.len(), road_cells, entities.len())
     }
 }
 
@@ -180,7 +290,7 @@ pub struct BuildingVisual {
 
 #[derive(Component, Debug)]
 pub struct Footprint {
-    pub cells: Vec<IVec2>,
+    pub polygon: Vec<Vec2>,
     pub passable: bool,
 }
 
@@ -339,7 +449,7 @@ pub fn update_build_preview(
     camera_query: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
     ground_query: Query<&GlobalTransform, With<Ground>>,
     assets: Option<Res<GameAssets>>,
-    grid: Res<MapGrid>,
+    geometry: Res<WorldGeometry>,
     mut build_state: ResMut<BuildState>,
     mut preview_query: Query<
         (Entity, &mut Transform, &mut Visibility),
@@ -373,31 +483,35 @@ pub fn update_build_preview(
     } else {
         cursor_world
     };
-    let center_cell = world_to_cell(position);
-    let cells = footprint_cells_rotated(center_cell, definition.size, build_state.rotation_angle);
     let snapped_position = if build_state.snap_to_grid {
-        cell_to_world(center_cell)
+        snap_to_grid(position)
     } else {
         position
     };
-
+    let polygon = footprint_polygon(
+        kind,
+        snapped_position,
+        definition.size,
+        build_state.rotation_angle,
+    );
     let entrance = planned_entrance(
         kind,
         snapped_position,
         definition.size,
         build_state.rotation_angle,
-        &cells,
     );
-    let entrance_cell = entrance.map(|entrance| entrance.cell);
-    let placement_issue =
-        grid.placement_issue_for(&cells, entrance_cell, kind != BuildingKind::Road);
+    let placement_issue = geometry.placement_issue_for_polygon(
+        &polygon,
+        entrance.map(|entrance| entrance.world_position),
+        kind != BuildingKind::Road,
+    );
     let valid = placement_issue.is_none();
     let invalid_reason = if valid { None } else { placement_issue };
 
     build_state.last_valid = valid;
     build_state.invalid_reason = invalid_reason;
     build_state.last_position = snapped_position;
-    build_state.last_cells = cells;
+    build_state.last_polygon = polygon;
     let reason_label = invalid_reason
         .map(PlacementIssue::label)
         .unwrap_or("unknown reason");
@@ -480,7 +594,7 @@ pub fn place_blueprint(
     mouse_buttons: Res<ButtonInput<MouseButton>>,
     button_interactions: Query<&Interaction, With<Button>>,
     assets: Option<Res<GameAssets>>,
-    mut grid: ResMut<MapGrid>,
+    mut geometry: ResMut<WorldGeometry>,
     mut build_state: ResMut<BuildState>,
 ) {
     if !mouse_buttons.just_pressed(MouseButton::Left) || !build_state.last_valid {
@@ -504,17 +618,18 @@ pub fn place_blueprint(
     let scale = preview_scale(kind, definition.size, definition.height);
     let rotation = Quat::from_rotation_y(build_state.rotation_angle);
     let passable = kind == BuildingKind::Road;
-    let cells = build_state.last_cells.clone();
+    let polygon = build_state.last_polygon.clone();
     let entrance = planned_entrance(
         kind,
         build_state.last_position,
         definition.size,
         build_state.rotation_angle,
-        &cells,
     );
-    let entrance_cell = entrance.map(|entrance| entrance.cell);
-    if let Some(issue) = grid.placement_issue_for(&cells, entrance_cell, kind != BuildingKind::Road)
-    {
+    if let Some(issue) = geometry.placement_issue_for_polygon(
+        &polygon,
+        entrance.map(|entrance| entrance.world_position),
+        kind != BuildingKind::Road,
+    ) {
         build_state.status = format!("Cannot place {}: {}.", definition.label, issue.label());
         build_state.last_valid = false;
         build_state.invalid_reason = Some(issue);
@@ -537,7 +652,7 @@ pub fn place_blueprint(
                 build_seconds: definition.build_seconds,
             },
             Footprint {
-                cells: cells.clone(),
+                polygon: polygon.clone(),
                 passable,
             },
         ))
@@ -552,13 +667,13 @@ pub fn place_blueprint(
         definition.height,
     );
 
-    grid.occupy(&cells, entity, passable);
-    if let (Some(entrance), Some(ec)) = (entrance, entrance_cell) {
+    geometry.occupy_polygon(polygon, entity, passable);
+    if let Some(entrance) = entrance {
         commands.entity(entity).insert(BuildingEntrance {
             world_position: entrance.world_position,
             local_offset: entrance.local_offset,
         });
-        grid.reserve_entrance(ec, entity);
+        geometry.reserve_entrance_point(entrance.world_position, entity);
         spawn_entrance_marker(&mut commands, &assets, entity, entrance.local_offset);
     }
     build_state.status = format!("Placed {} blueprint.", definition.label);
@@ -614,7 +729,7 @@ pub fn finish_blueprints(
         });
         if let Some(footprint) = footprint {
             entity_commands.insert(Footprint {
-                cells: footprint.cells.clone(),
+                polygon: footprint.polygon.clone(),
                 passable: footprint.passable,
             });
         }
@@ -690,7 +805,6 @@ fn visual_translation(height: f32) -> Vec3 {
 struct PlannedEntrance {
     world_position: Vec3,
     local_offset: Vec3,
-    cell: IVec2,
 }
 
 fn planned_entrance(
@@ -698,53 +812,20 @@ fn planned_entrance(
     building_center: Vec3,
     size: IVec2,
     rotation_angle: f32,
-    footprint_cells: &[IVec2],
 ) -> Option<PlannedEntrance> {
     kind.entrance_direction().map(|direction| {
         let local_offset = entrance_local_offset(size, direction);
-        let visual_world_position =
-            entrance_world_position(building_center, size, rotation_angle, direction);
-        let mut cell = world_to_cell(visual_world_position);
-        let step = rotated_entrance_step(direction, rotation_angle);
-        while footprint_cells.contains(&cell) {
-            cell += step;
-        }
 
         PlannedEntrance {
-            world_position: cell_to_world(cell),
+            world_position: entrance_world_position(
+                building_center,
+                size,
+                rotation_angle,
+                direction,
+            ),
             local_offset,
-            cell,
         }
     })
-}
-
-fn rotated_entrance_step(direction: IVec2, rotation_angle: f32) -> IVec2 {
-    let local_direction = Vec3::new(direction.x as f32, 0.0, direction.y as f32);
-    let rotated_direction = Quat::from_rotation_y(rotation_angle) * local_direction;
-    let step = IVec2::new(
-        rotated_axis_step(rotated_direction.x),
-        rotated_axis_step(rotated_direction.z),
-    );
-
-    if step != IVec2::ZERO {
-        return step;
-    }
-
-    if rotated_direction.x.abs() >= rotated_direction.z.abs() {
-        IVec2::new(rotated_direction.x.signum() as i32, 0)
-    } else {
-        IVec2::new(0, rotated_direction.z.signum() as i32)
-    }
-}
-
-fn rotated_axis_step(value: f32) -> i32 {
-    if value > 0.333 {
-        1
-    } else if value < -0.333 {
-        -1
-    } else {
-        0
-    }
 }
 
 fn sync_building_visual(
@@ -807,6 +888,230 @@ fn spawn_entrance_marker(
 
 fn entrance_marker_translation(local_offset: Vec3) -> Vec3 {
     Vec3::new(local_offset.x, 0.04, local_offset.z)
+}
+
+pub fn footprint_polygon(
+    kind: BuildingKind,
+    center: Vec3,
+    size: IVec2,
+    rotation_angle: f32,
+) -> Vec<Vec2> {
+    rectangle_polygon(center, footprint_dimensions(kind, size), rotation_angle)
+}
+
+pub fn resource_obstacle_polygon(position: Vec3) -> Vec<Vec2> {
+    rectangle_polygon(
+        Vec3::new(position.x, 0.0, position.z),
+        Vec2::splat(0.8),
+        0.0,
+    )
+}
+
+pub fn rectangle_polygon(center: Vec3, size: Vec2, rotation_angle: f32) -> Vec<Vec2> {
+    let half = size * 0.5;
+    let cos = rotation_angle.cos();
+    let sin = rotation_angle.sin();
+    [
+        (-half.x, -half.y),
+        (half.x, -half.y),
+        (half.x, half.y),
+        (-half.x, half.y),
+    ]
+    .into_iter()
+    .map(|(local_x, local_z)| {
+        Vec2::new(
+            center.x + local_x * cos + local_z * sin,
+            center.z - local_x * sin + local_z * cos,
+        )
+    })
+    .collect()
+}
+
+pub fn expanded_polygon(polygon: &[Vec2], padding: f32) -> Vec<Vec2> {
+    if padding <= 0.0 || polygon.is_empty() {
+        return polygon.to_vec();
+    }
+
+    let center = polygon
+        .iter()
+        .copied()
+        .fold(Vec2::ZERO, |sum, point| sum + point)
+        / polygon.len() as f32;
+    polygon
+        .iter()
+        .map(|point| {
+            let from_center = *point - center;
+            if from_center.length_squared() < GEOMETRY_EPSILON {
+                *point
+            } else {
+                *point + from_center.normalize() * padding
+            }
+        })
+        .collect()
+}
+
+pub fn polygons_intersect(left: &[Vec2], right: &[Vec2]) -> bool {
+    if left.len() < 3 || right.len() < 3 {
+        return false;
+    }
+
+    !has_separating_axis(left, right) && !has_separating_axis(right, left)
+}
+
+pub fn point_in_polygon(point: Vec2, polygon: &[Vec2]) -> bool {
+    if polygon.len() < 3 {
+        return false;
+    }
+
+    let mut sign = 0.0f32;
+    for index in 0..polygon.len() {
+        let a = polygon[index];
+        let b = polygon[(index + 1) % polygon.len()];
+        let cross = cross_2d(b - a, point - a);
+        if cross.abs() <= GEOMETRY_EPSILON {
+            continue;
+        }
+        if sign == 0.0 {
+            sign = cross.signum();
+        } else if sign * cross < -GEOMETRY_EPSILON {
+            return false;
+        }
+    }
+
+    true
+}
+
+pub fn segment_intersects_polygon(from: Vec2, to: Vec2, polygon: &[Vec2]) -> bool {
+    if polygon.len() < 3 {
+        return false;
+    }
+    if point_in_polygon(from, polygon) || point_in_polygon(to, polygon) {
+        return true;
+    }
+
+    polygon.iter().enumerate().any(|(index, start)| {
+        let end = polygon[(index + 1) % polygon.len()];
+        segments_intersect(from, to, *start, end)
+    })
+}
+
+pub fn distance_to_polygon(point: Vec2, polygon: &[Vec2]) -> f32 {
+    if point_in_polygon(point, polygon) {
+        return 0.0;
+    }
+
+    polygon
+        .iter()
+        .enumerate()
+        .map(|(index, start)| {
+            let end = polygon[(index + 1) % polygon.len()];
+            distance_to_segment(point, *start, end)
+        })
+        .fold(f32::MAX, f32::min)
+}
+
+pub fn xz(position: Vec3) -> Vec2 {
+    Vec2::new(position.x, position.z)
+}
+
+fn footprint_dimensions(kind: BuildingKind, size: IVec2) -> Vec2 {
+    if kind == BuildingKind::Road {
+        Vec2::splat(CELL_SIZE * ROAD_FOOTPRINT_SCALE)
+    } else {
+        Vec2::new(
+            size.x as f32 * CELL_SIZE * FOOTPRINT_SCALE,
+            size.y as f32 * CELL_SIZE * FOOTPRINT_SCALE,
+        )
+    }
+}
+
+fn has_separating_axis(left: &[Vec2], right: &[Vec2]) -> bool {
+    for index in 0..left.len() {
+        let a = left[index];
+        let b = left[(index + 1) % left.len()];
+        let edge = b - a;
+        if edge.length_squared() <= GEOMETRY_EPSILON {
+            continue;
+        }
+        let axis = Vec2::new(-edge.y, edge.x).normalize();
+        let (left_min, left_max) = project_polygon(left, axis);
+        let (right_min, right_max) = project_polygon(right, axis);
+        if left_max <= right_min + GEOMETRY_EPSILON || right_max <= left_min + GEOMETRY_EPSILON {
+            return true;
+        }
+    }
+    false
+}
+
+fn project_polygon(polygon: &[Vec2], axis: Vec2) -> (f32, f32) {
+    polygon
+        .iter()
+        .map(|point| point.dot(axis))
+        .fold((f32::MAX, f32::MIN), |(min, max), value| {
+            (min.min(value), max.max(value))
+        })
+}
+
+fn segments_intersect(a: Vec2, b: Vec2, c: Vec2, d: Vec2) -> bool {
+    let r = b - a;
+    let s = d - c;
+    let denominator = cross_2d(r, s);
+    let c_minus_a = c - a;
+
+    if denominator.abs() <= GEOMETRY_EPSILON {
+        if cross_2d(c_minus_a, r).abs() > GEOMETRY_EPSILON {
+            return false;
+        }
+        let rr = r.length_squared();
+        if rr <= GEOMETRY_EPSILON {
+            return a.distance(c) <= GEOMETRY_EPSILON;
+        }
+        let t0 = c_minus_a.dot(r) / rr;
+        let t1 = t0 + s.dot(r) / rr;
+        let min_t = t0.min(t1);
+        let max_t = t0.max(t1);
+        return max_t > GEOMETRY_EPSILON && min_t < 1.0 - GEOMETRY_EPSILON;
+    }
+
+    let t = cross_2d(c_minus_a, s) / denominator;
+    let u = cross_2d(c_minus_a, r) / denominator;
+    t >= -GEOMETRY_EPSILON
+        && t <= 1.0 + GEOMETRY_EPSILON
+        && u >= -GEOMETRY_EPSILON
+        && u <= 1.0 + GEOMETRY_EPSILON
+}
+
+fn distance_to_segment(point: Vec2, start: Vec2, end: Vec2) -> f32 {
+    let segment = end - start;
+    let length_squared = segment.length_squared();
+    if length_squared <= GEOMETRY_EPSILON {
+        return point.distance(start);
+    }
+    let t = ((point - start).dot(segment) / length_squared).clamp(0.0, 1.0);
+    point.distance(start + segment * t)
+}
+
+fn cross_2d(left: Vec2, right: Vec2) -> f32 {
+    left.x * right.y - left.y * right.x
+}
+
+#[cfg(test)]
+fn cell_polygon(cell: IVec2) -> Vec<Vec2> {
+    rectangle_polygon(
+        Vec3::new(cell.x as f32 * CELL_SIZE, 0.0, cell.y as f32 * CELL_SIZE),
+        Vec2::splat(CELL_SIZE),
+        0.0,
+    )
+}
+
+#[cfg(test)]
+fn cell_center_2d(cell: IVec2) -> Vec2 {
+    Vec2::new(cell.x as f32 * CELL_SIZE, cell.y as f32 * CELL_SIZE)
+}
+
+fn within_world_bounds(point: Vec2) -> bool {
+    let half = (MAP_HALF_CELLS as f32 + 0.5) * CELL_SIZE;
+    point.x >= -half && point.x <= half && point.y >= -half && point.y <= half
 }
 
 #[cfg(test)]
@@ -942,22 +1247,16 @@ mod tests {
     }
 
     #[test]
-    fn planned_entrance_uses_grid_center_for_navigation_target() {
+    fn planned_entrance_uses_continuous_world_position() {
         let building_center = Vec3::new(1.37, 0.0, -2.22);
         let rotation_angle = 0.37;
         let definition = BuildingKind::Storage.definition();
-        let footprint_cells = footprint_cells_rotated(
-            world_to_cell(building_center),
-            definition.size,
-            rotation_angle,
-        );
 
         let entrance = planned_entrance(
             BuildingKind::Storage,
             building_center,
             definition.size,
             rotation_angle,
-            &footprint_cells,
         )
         .unwrap();
         let visual_world_position = entrance_world_position(
@@ -966,15 +1265,8 @@ mod tests {
             rotation_angle,
             BuildingKind::Storage.entrance_direction().unwrap(),
         );
-        let raw_cell = world_to_cell(visual_world_position);
 
-        if footprint_cells.contains(&raw_cell) {
-            assert_ne!(entrance.cell, raw_cell);
-        } else {
-            assert_eq!(entrance.cell, raw_cell);
-        }
-        assert!(!footprint_cells.contains(&entrance.cell));
-        assert_eq!(entrance.world_position, cell_to_world(entrance.cell));
+        assert_vec3_approx_eq(entrance.world_position, visual_world_position);
         assert_eq!(
             entrance.local_offset,
             entrance_local_offset(
@@ -985,35 +1277,81 @@ mod tests {
     }
 
     #[test]
-    fn planned_entrance_moves_navigation_cell_outside_rotated_footprint() {
+    fn planned_entrance_point_sits_outside_rotated_footprint() {
         let building_center = Vec3::new(1.37, 0.0, -2.22);
         let rotation_angle = 0.37;
         let definition = BuildingKind::Storage.definition();
-        let footprint_cells = footprint_cells_rotated(
-            world_to_cell(building_center),
+        let polygon = footprint_polygon(
+            BuildingKind::Storage,
+            building_center,
             definition.size,
             rotation_angle,
         );
-        let entity = Entity::from_raw_u32(1).unwrap();
-        let mut grid = MapGrid::default();
 
         let entrance = planned_entrance(
             BuildingKind::Storage,
             building_center,
             definition.size,
             rotation_angle,
-            &footprint_cells,
         )
         .unwrap();
-        grid.occupy(&footprint_cells, entity, false);
 
-        assert!(!footprint_cells.contains(&entrance.cell));
-        assert!(grid.is_walkable(entrance.cell));
-        assert!(crate::navigation::path_to_waypoints(
-            &grid,
-            Vec3::new(-1.2, 0.0, 1.0),
-            entrance.world_position,
-        )
-        .is_some());
+        assert!(!point_in_polygon(xz(entrance.world_position), &polygon));
+    }
+
+    #[test]
+    fn polygon_placement_rejects_overlapping_rotated_footprint() {
+        let mut world = World::new();
+        let entity = world.spawn_empty().id();
+        let mut geometry = WorldGeometry::default();
+        let definition = BuildingKind::Storage.definition();
+        let first = footprint_polygon(BuildingKind::Storage, Vec3::ZERO, definition.size, 0.37);
+        let overlapping = footprint_polygon(
+            BuildingKind::House,
+            Vec3::new(0.4, 0.0, 0.2),
+            BuildingKind::House.definition().size,
+            -0.2,
+        );
+
+        geometry.occupy_polygon(first, entity, false);
+
+        assert_eq!(
+            geometry.placement_issue_for_polygon(&overlapping, None, true),
+            Some(PlacementIssue::Occupied)
+        );
+    }
+
+    #[test]
+    fn occupied_polygon_blocks_los_but_continuous_entrance_remains_reachable() {
+        let mut world = World::new();
+        let entity = world.spawn_empty().id();
+        let mut geometry = WorldGeometry::default();
+        let definition = BuildingKind::Storage.definition();
+        let center = Vec3::new(1.37, 0.0, -2.22);
+        let rotation = 0.37;
+        let polygon = footprint_polygon(BuildingKind::Storage, center, definition.size, rotation);
+        let entrance =
+            planned_entrance(BuildingKind::Storage, center, definition.size, rotation).unwrap();
+
+        geometry.occupy_polygon(polygon, entity, false);
+        geometry.reserve_entrance_point(entrance.world_position, entity);
+
+        assert!(geometry.is_walkable_point(entrance.world_position));
+        assert!(
+            crate::navigation::path_to_waypoints(
+                &geometry,
+                Vec3::new(-1.2, 0.0, 1.0),
+                entrance.world_position,
+            )
+            .is_some()
+        );
+    }
+
+    fn assert_vec3_approx_eq(actual: Vec3, expected: Vec3) {
+        let delta = actual - expected;
+        assert!(
+            delta.length() < 0.0001,
+            "expected {expected:?}, got {actual:?}"
+        );
     }
 }
