@@ -10,6 +10,14 @@ use crate::types::{MAP_BUILD_HALF_EXTENT, MAP_GRID_CELLS};
 const GRID_SPACING: f32 = 1.0;
 const GRID_AXIS_Y: f32 = 0.02;
 
+pub struct CameraPlugin;
+
+impl Plugin for CameraPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(Update, (control_camera, draw_grid));
+    }
+}
+
 #[derive(Component)]
 pub struct OrbitCamera {
     focus: Vec3,

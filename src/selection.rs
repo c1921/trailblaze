@@ -3,9 +3,19 @@ use bevy::{prelude::*, window::PrimaryWindow};
 use crate::{
     building::{Blueprint, BuildState, CompletedBuilding},
     colonist::Colonist,
+    math::xz_distance,
     types::{BuildingKind, CELL_SIZE},
     world::{Ground, ResourceNode},
 };
+
+pub struct SelectionPlugin;
+
+impl Plugin for SelectionPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<SelectionState>()
+            .add_systems(Update, (select_target, draw_selection_highlight));
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SelectedTarget {
@@ -278,9 +288,6 @@ fn building_visual_size(kind: BuildingKind) -> Vec2 {
     }
 }
 
-fn xz_distance(left: Vec3, right: Vec3) -> f32 {
-    Vec2::new(left.x - right.x, left.z - right.z).length()
-}
 
 #[cfg(test)]
 mod tests {

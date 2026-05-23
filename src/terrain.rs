@@ -1,5 +1,6 @@
 use bevy::prelude::*;
 
+use crate::math::{xz_distance, xz_length};
 use crate::types::{CELL_SIZE, MAP_HALF_CELLS, ResourceKind};
 
 pub const DEFAULT_TERRAIN_SEED: u64 = 0x5452_4149_4C42_4C5A;
@@ -17,6 +18,14 @@ const FORAGE_THRESHOLD: f32 = 0.59;
 const FOREST_SALT: u64 = 0x464F_5245_5354;
 const FORAGE_SALT: u64 = 0x464F_5241_4745;
 const JITTER_SALT: u64 = 0x4A49_5454_4552;
+
+pub struct TerrainPlugin;
+
+impl Plugin for TerrainPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<TerrainGenerationConfig>();
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TerrainKind {
@@ -282,14 +291,6 @@ fn smoothstep(value: f32) -> f32 {
 
 fn lerp(left: f32, right: f32, amount: f32) -> f32 {
     left + (right - left) * amount
-}
-
-fn xz_distance(left: Vec3, right: Vec3) -> f32 {
-    Vec2::new(left.x - right.x, left.z - right.z).length()
-}
-
-fn xz_length(position: Vec3) -> f32 {
-    Vec2::new(position.x, position.z).length()
 }
 
 #[cfg(test)]

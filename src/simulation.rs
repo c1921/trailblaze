@@ -1,5 +1,14 @@
 use bevy::prelude::*;
 
+pub struct SimulationPlugin;
+
+impl Plugin for SimulationPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<SimulationClock>()
+            .add_systems(Update, control_time);
+    }
+}
+
 #[derive(Resource, Debug, Clone)]
 pub struct SimulationClock {
     pub paused: bool,

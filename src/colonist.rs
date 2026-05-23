@@ -2,6 +2,7 @@ use bevy::prelude::*;
 
 use crate::{
     building::{Blueprint, BuildingEntrance, CompletedBuilding, WorldGeometry},
+    math::xz_distance,
     navigation::{line_of_sight_clear, path_to_waypoints},
     resources::ResourceStock,
     simulation::SimulationClock,
@@ -14,6 +15,14 @@ const GATHER_AMOUNT: i32 = 4;
 const GATHER_SECONDS: f32 = 1.4;
 const BUILD_RATE: f32 = 1.0;
 const STOCKPILE_POSITION: Vec3 = Vec3::new(0.0, 0.0, 0.0);
+
+pub struct ColonistPlugin;
+
+impl Plugin for ColonistPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(Update, (assign_idle_colonists, update_colonists));
+    }
+}
 
 #[derive(Component, Debug)]
 pub struct Colonist {
@@ -547,10 +556,6 @@ fn move_toward(transform: &mut Transform, target: Vec3, speed: f32, dt: f32) -> 
         transform.rotation = Quat::from_rotation_y(yaw);
         false
     }
-}
-
-fn xz_distance(left: Vec3, right: Vec3) -> f32 {
-    Vec2::new(left.x - right.x, left.z - right.z).length()
 }
 
 #[cfg(test)]

@@ -2,7 +2,8 @@ use std::{cmp::Ordering, collections::BinaryHeap};
 
 use bevy::prelude::*;
 
-use crate::building::{WorldGeometry, expanded_polygon, segment_intersects_polygon, xz};
+use crate::building::{WorldGeometry, expanded_polygon, segment_intersects_polygon};
+use crate::math::{xz, xz_distance};
 
 const AGENT_RADIUS: f32 = 0.08;
 const VISIBILITY_NODE_MARGIN: f32 = 0.16;
@@ -175,10 +176,6 @@ fn push_unique_node(nodes: &mut Vec<Vec2>, node: Vec2) {
         return;
     }
     nodes.push(node);
-}
-
-fn xz_distance(left: Vec3, right: Vec3) -> f32 {
-    Vec2::new(left.x - right.x, left.z - right.z).length()
 }
 
 #[cfg(test)]

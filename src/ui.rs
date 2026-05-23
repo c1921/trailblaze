@@ -16,6 +16,15 @@ const BUTTON: Color = Color::srgb(0.18, 0.2, 0.22);
 const BUTTON_HOVER: Color = Color::srgb(0.26, 0.29, 0.31);
 const BUTTON_ACTIVE: Color = Color::srgb(0.26, 0.42, 0.28);
 
+pub struct UiPlugin;
+
+impl Plugin for UiPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(Startup, spawn_ui.after(crate::world::setup_scene))
+            .add_systems(Update, (handle_ui_buttons, update_ui_text));
+    }
+}
+
 #[derive(Component)]
 pub struct ResourceText;
 
