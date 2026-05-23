@@ -20,6 +20,7 @@ pub struct BuildState {
     pub last_valid: bool,
     pub last_position: Vec3,
     pub last_cells: Vec<IVec2>,
+    pub invalid_reason: Option<PlacementIssue>,
     pub status: String,
 }
 
@@ -33,7 +34,23 @@ impl Default for BuildState {
             last_valid: false,
             last_position: Vec3::ZERO,
             last_cells: Vec::new(),
+            invalid_reason: None,
             status: "Select a building to start planning.".to_string(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PlacementIssue {
+    OutOfBounds,
+    Occupied,
+}
+
+impl PlacementIssue {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::OutOfBounds => "outside the buildable area",
+            Self::Occupied => "blocked by another plan or building",
         }
     }
 }
@@ -51,9 +68,18 @@ pub struct MapGrid {
 
 impl MapGrid {
     pub fn is_area_free(&self, cells: &[IVec2]) -> bool {
-        cells
-            .iter()
-            .all(|cell| within_map(*cell) && !self.occupied.contains_key(cell))
+        self.placement_issue(cells).is_none()
+    }
+
+    pub fn placement_issue(&self, cells: &[IVec2]) -> Option<PlacementIssue> {
+        if cells.iter().any(|cell| !within_map(*cell)) {
+            return Some(PlacementIssue::OutOfBounds);
+        }
+        if cells.iter().any(|cell| self.occupied.contains_key(cell)) {
+            return Some(PlacementIssue::Occupied);
+        }
+
+        None
     }
 
     pub fn occupy(&mut self, cells: &[IVec2], entity: Entity, passable: bool) {
@@ -106,6 +132,45 @@ impl Blueprint {
     pub fn is_complete(&self) -> bool {
         self.has_materials() && self.progress >= self.build_seconds
     }
+
+    pub fn progress_ratio(&self) -> f32 {
+        if self.build_seconds <= 0.0 {
+            1.0
+        } else {
+            (self.progress / self.build_seconds).clamp(0.0, 1.0)
+        }
+    }
+
+    pub fn status(&self) -> BlueprintStatus {
+        if !self.has_materials() {
+            BlueprintStatus::WaitingForMaterials
+        } else if self.is_complete() {
+            BlueprintStatus::Complete
+        } else if self.progress > 0.0 {
+            BlueprintStatus::Building
+        } else {
+            BlueprintStatus::WaitingForBuilder
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BlueprintStatus {
+    WaitingForMaterials,
+    WaitingForBuilder,
+    Building,
+    Complete,
+}
+
+impl BlueprintStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::WaitingForMaterials => "Waiting for materials",
+            Self::WaitingForBuilder => "Waiting for builder",
+            Self::Building => "Building",
+            Self::Complete => "Complete",
+        }
+    }
 }
 
 #[derive(Component, Debug)]
@@ -146,6 +211,7 @@ pub fn handle_build_hotkeys(
     {
         build_state.selected = None;
         build_state.last_valid = false;
+        build_state.invalid_reason = None;
         build_state.status = "Build mode cancelled.".to_string();
     }
 }
@@ -192,21 +258,30 @@ pub fn update_build_preview(
     let center_cell = world_to_cell(position);
     let cells = footprint_cells(center_cell, size);
     let valid = grid.is_area_free(&cells);
+    let invalid_reason = if valid {
+        None
+    } else {
+        grid.placement_issue(&cells)
+    };
 
     build_state.last_valid = valid;
+    build_state.invalid_reason = invalid_reason;
     build_state.last_position = if build_state.snap_to_grid {
         cell_to_world(center_cell)
     } else {
         position
     };
     build_state.last_cells = cells;
+    let reason_label = invalid_reason
+        .map(PlacementIssue::label)
+        .unwrap_or("unknown reason");
     build_state.status = if valid {
         format!(
             "{} blueprint ready. Cost: {} wood.",
             definition.label, definition.wood_cost
         )
     } else {
-        format!("Cannot place {} here.", definition.label)
+        format!("Cannot place {}: {}.", definition.label, reason_label)
     };
 
     let scale = preview_scale(kind, size, definition.height);
@@ -307,6 +382,16 @@ pub fn place_blueprint(
     grid.occupy(&cells, entity, passable);
     build_state.status = format!("Placed {} blueprint.", definition.label);
     build_state.last_valid = false;
+    build_state.invalid_reason = None;
+}
+
+pub fn update_blueprint_visuals(mut blueprints: Query<(&Blueprint, &mut Transform)>) {
+    for (blueprint, mut transform) in &mut blueprints {
+        let height = blueprint.kind.definition().height;
+        let visual_height = (height * (0.35 + blueprint.progress_ratio() * 0.65)).max(0.04);
+        transform.scale.y = visual_height;
+        transform.translation.y = visual_height * 0.5;
+    }
 }
 
 pub fn finish_blueprints(
@@ -360,6 +445,7 @@ fn hide_preview(
         With<BuildPreview>,
     >,
 ) {
+    build_state.invalid_reason = None;
     build_state.last_valid = false;
     if let Some(entity) = build_state.preview_entity {
         if let Ok((_, _, _, mut visibility)) = preview_query.get_mut(entity) {
@@ -430,5 +516,41 @@ mod tests {
         assert!(!blueprint.is_complete());
         blueprint.delivered_wood = 4;
         assert!(blueprint.is_complete());
+    }
+
+    #[test]
+    fn blueprint_status_tracks_materials_and_work() {
+        let mut blueprint = Blueprint {
+            kind: BuildingKind::House,
+            required_wood: 4,
+            delivered_wood: 0,
+            progress: 0.0,
+            build_seconds: 5.0,
+        };
+
+        assert_eq!(blueprint.status(), BlueprintStatus::WaitingForMaterials);
+        blueprint.delivered_wood = 4;
+        assert_eq!(blueprint.status(), BlueprintStatus::WaitingForBuilder);
+        blueprint.progress = 2.0;
+        assert_eq!(blueprint.status(), BlueprintStatus::Building);
+        blueprint.progress = 5.0;
+        assert_eq!(blueprint.status(), BlueprintStatus::Complete);
+    }
+
+    #[test]
+    fn placement_issue_prefers_map_bounds_before_occupancy() {
+        let mut world = World::new();
+        let entity = world.spawn_empty().id();
+        let mut grid = MapGrid::default();
+        grid.occupy(&[IVec2::new(0, 0)], entity, false);
+
+        assert_eq!(
+            grid.placement_issue(&[IVec2::new(0, 0)]),
+            Some(PlacementIssue::Occupied)
+        );
+        assert_eq!(
+            grid.placement_issue(&[IVec2::new(0, 0), IVec2::new(999, 999)]),
+            Some(PlacementIssue::OutOfBounds)
+        );
     }
 }

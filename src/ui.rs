@@ -4,8 +4,10 @@ use crate::{
     building::{Blueprint, BuildState, CompletedBuilding, MapGrid},
     colonist::Colonist,
     resources::ResourceStock,
+    selection::{SelectedTarget, SelectionState},
     simulation::SimulationClock,
     types::{BuildingKind, ResourceKind},
+    world::ResourceNode,
 };
 
 const PANEL: Color = Color::srgba(0.08, 0.09, 0.1, 0.82);
@@ -18,6 +20,12 @@ pub struct ResourceText;
 
 #[derive(Component)]
 pub struct StatusText;
+
+#[derive(Component)]
+pub struct SelectionTitle;
+
+#[derive(Component)]
+pub struct SelectionBody;
 
 #[derive(Component)]
 pub struct BuildButton(pub BuildingKind);
@@ -57,6 +65,34 @@ pub fn spawn_ui(mut commands: Commands) {
                 Text::new("Select a building."),
                 TextColor(Color::srgb(0.86, 0.9, 0.92)),
             )
+        ],
+    ));
+
+    commands.spawn((
+        Node {
+            position_type: PositionType::Absolute,
+            right: px(12),
+            top: px(68),
+            width: px(330),
+            min_height: px(220),
+            display: Display::Flex,
+            flex_direction: FlexDirection::Column,
+            row_gap: px(10),
+            padding: UiRect::all(px(14)),
+            ..default()
+        },
+        BackgroundColor(PANEL),
+        children![
+            (
+                SelectionTitle,
+                Text::new("Nothing selected"),
+                TextColor(Color::WHITE),
+            ),
+            (
+                SelectionBody,
+                Text::new("Click a settler, building, blueprint, or resource node."),
+                TextColor(Color::srgb(0.84, 0.88, 0.9)),
+            ),
         ],
     ));
 
@@ -165,31 +201,30 @@ pub fn update_ui_text(
     clock: Res<SimulationClock>,
     build_state: Res<BuildState>,
     grid: Res<MapGrid>,
-    colonists: Query<&Colonist>,
-    completed: Query<&CompletedBuilding>,
-    blueprints: Query<&Blueprint>,
-    mut resource_text: Query<&mut Text, (With<ResourceText>, Without<StatusText>)>,
-    mut status_text: Query<&mut Text, (With<StatusText>, Without<ResourceText>)>,
+    selection: Res<SelectionState>,
+    colonists: Query<(Entity, &Colonist)>,
+    completed: Query<(Entity, &CompletedBuilding)>,
+    blueprints: Query<(Entity, &Blueprint)>,
+    resource_nodes: Query<(Entity, &ResourceNode)>,
+    mut text_queries: ParamSet<(
+        Query<&mut Text, With<ResourceText>>,
+        Query<&mut Text, With<StatusText>>,
+        Query<&mut Text, With<SelectionTitle>>,
+        Query<&mut Text, With<SelectionBody>>,
+    )>,
 ) {
     let population = colonists.iter().count() as i32;
     let capacity: i32 = completed
         .iter()
-        .map(|building| building.kind.definition().population_capacity)
+        .map(|(_, building)| building.kind.definition().population_capacity)
         .sum();
-    let completed_count = completed.iter().count();
-    let blueprint_count = blueprints.iter().count();
     let idle_count = colonists
         .iter()
-        .filter(|colonist| matches!(colonist.state, crate::colonist::ColonistState::Idle))
+        .filter(|(_, colonist)| matches!(colonist.state, crate::colonist::ColonistState::Idle))
         .count();
-    let lead_name = colonists
-        .iter()
-        .next()
-        .map(|colonist| colonist.name.as_str())
-        .unwrap_or("No settlers");
-    let (occupied_cells, road_cells, occupied_entities) = grid.summary();
+    let (occupied_cells, road_cells, _) = grid.summary();
 
-    if let Ok(mut text) = resource_text.single_mut() {
+    if let Ok(mut text) = text_queries.p0().single_mut() {
         text.0 = format!(
             "{}: {}  {}: {}  Pop: {}/{}  Idle: {}  Time: {}",
             ResourceKind::Wood.label(),
@@ -203,22 +238,32 @@ pub fn update_ui_text(
         );
     }
 
-    if let Ok(mut text) = status_text.single_mut() {
+    if let Ok(mut text) = text_queries.p1().single_mut() {
         text.0 = format!(
-            "{}  Built: {}  Blueprints: {}  Cells: {}/{} roads/{} sites  Lead: {}  Snap: {}",
+            "{}  Cells: {}  Roads: {}  Snap: {}",
             build_state.status,
-            completed_count,
-            blueprint_count,
             occupied_cells,
             road_cells,
-            occupied_entities,
-            lead_name,
             if build_state.snap_to_grid {
                 "On"
             } else {
                 "Off"
             }
         );
+    }
+
+    let (title, body) = selected_panel_text(
+        &selection,
+        &colonists,
+        &completed,
+        &blueprints,
+        &resource_nodes,
+    );
+    if let Ok(mut text) = text_queries.p2().single_mut() {
+        text.0 = title;
+    }
+    if let Ok(mut text) = text_queries.p3().single_mut() {
+        text.0 = body;
     }
 }
 
@@ -274,4 +319,102 @@ fn hotkey_label(kind: BuildingKind) -> &'static str {
         BuildingKind::Gatherer => "4",
         BuildingKind::Road => "5",
     }
+}
+
+fn selected_panel_text(
+    selection: &SelectionState,
+    colonists: &Query<(Entity, &Colonist)>,
+    completed: &Query<(Entity, &CompletedBuilding)>,
+    blueprints: &Query<(Entity, &Blueprint)>,
+    resource_nodes: &Query<(Entity, &ResourceNode)>,
+) -> (String, String) {
+    let Some(selected) = selection.selected else {
+        return (
+            "Nothing selected".to_string(),
+            "Click a settler, building, blueprint, or resource node.".to_string(),
+        );
+    };
+
+    match selected {
+        SelectedTarget::Colonist(entity) => colonists
+            .get(entity)
+            .map(|(_, colonist)| {
+                (
+                    colonist.name.clone(),
+                    format!(
+                        "Status: {}\nSpeed: {:.1}",
+                        colonist.status_label(),
+                        colonist.speed
+                    ),
+                )
+            })
+            .unwrap_or_else(|_| missing_selection()),
+        SelectedTarget::Resource(entity) => resource_nodes
+            .get(entity)
+            .map(|(_, node)| {
+                let required_building = match node.kind {
+                    ResourceKind::Wood => BuildingKind::Woodcutter,
+                    ResourceKind::Food => BuildingKind::Gatherer,
+                };
+                let enabled = completed
+                    .iter()
+                    .any(|(_, building)| building.kind == required_building);
+                (
+                    format!("{} node", node.kind.label()),
+                    format!(
+                        "Remaining: {}\nUsed by: {}\nReady to gather: {}",
+                        node.amount,
+                        required_building.definition().label,
+                        if enabled { "Yes" } else { "Needs building" }
+                    ),
+                )
+            })
+            .unwrap_or_else(|_| missing_selection()),
+        SelectedTarget::Blueprint(entity) => blueprints
+            .get(entity)
+            .map(|(_, blueprint)| {
+                let definition = blueprint.kind.definition();
+                (
+                    format!("{} blueprint", definition.label),
+                    format!(
+                        "Status: {}\nWood: {}/{}\nConstruction: {:.0}%\n{}",
+                        blueprint.status().label(),
+                        blueprint.delivered_wood,
+                        blueprint.required_wood,
+                        blueprint.progress_ratio() * 100.0,
+                        if blueprint.needs_wood() > 0 {
+                            "Settlers will deliver wood when stock is available."
+                        } else {
+                            "Waiting for a builder to finish construction."
+                        }
+                    ),
+                )
+            })
+            .unwrap_or_else(|_| missing_selection()),
+        SelectedTarget::Building(entity) => completed
+            .get(entity)
+            .map(|(_, building)| {
+                let definition = building.kind.definition();
+                (
+                    definition.label.to_string(),
+                    format!(
+                        "{}\nCapacity: {}\nStatus: Operating",
+                        building.kind.description(),
+                        if definition.population_capacity > 0 {
+                            definition.population_capacity.to_string()
+                        } else {
+                            "None".to_string()
+                        }
+                    ),
+                )
+            })
+            .unwrap_or_else(|_| missing_selection()),
+    }
+}
+
+fn missing_selection() -> (String, String) {
+    (
+        "Selection lost".to_string(),
+        "The selected object is no longer available.".to_string(),
+    )
 }

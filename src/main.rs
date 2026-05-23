@@ -2,6 +2,7 @@ mod building;
 mod camera;
 mod colonist;
 mod resources;
+mod selection;
 mod simulation;
 mod types;
 mod ui;
@@ -16,6 +17,7 @@ fn main() {
         .init_resource::<simulation::SimulationClock>()
         .init_resource::<building::BuildState>()
         .init_resource::<building::MapGrid>()
+        .init_resource::<selection::SelectionState>()
         .add_plugins(DefaultPlugins)
         .add_systems(Startup, (world::setup_scene, ui::spawn_ui).chain())
         .add_systems(
@@ -28,9 +30,12 @@ fn main() {
                 building::handle_build_hotkeys,
                 building::update_build_preview,
                 building::place_blueprint,
+                selection::select_target,
                 colonist::assign_idle_colonists,
                 colonist::update_colonists,
+                building::update_blueprint_visuals,
                 building::finish_blueprints,
+                selection::draw_selection_highlight,
                 ui::update_ui_text,
             ),
         )

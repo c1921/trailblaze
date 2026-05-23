@@ -57,6 +57,34 @@ pub enum Task {
     },
 }
 
+impl Colonist {
+    pub fn status_label(&self) -> String {
+        self.state.label()
+    }
+}
+
+impl ColonistState {
+    pub fn label(&self) -> String {
+        match self {
+            Self::Idle => "Idle".to_string(),
+            Self::Moving { task, .. } => format!("Moving: {}", task.label()),
+            Self::Gathering { kind, .. } => format!("Gathering {}", kind.label()),
+            Self::Building { .. } => "Building a blueprint".to_string(),
+        }
+    }
+}
+
+impl Task {
+    pub fn label(&self) -> String {
+        match self {
+            Self::DeliverMaterial { wood, .. } => format!("Delivering {} wood", wood),
+            Self::Build { .. } => "Going to build".to_string(),
+            Self::Gather { kind, .. } => format!("Going to gather {}", kind.label()),
+            Self::Deposit { kind, amount } => format!("Depositing {} {}", amount, kind.label()),
+        }
+    }
+}
+
 pub fn assign_idle_colonists(
     mut stock: ResMut<ResourceStock>,
     mut colonists: Query<&mut Colonist>,

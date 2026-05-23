@@ -100,6 +100,16 @@ impl BuildingKind {
             Self::Road => KeyCode::Digit5,
         }
     }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::House => "Provides housing capacity for settlers.",
+            Self::Storage => "Receives gathered supplies and construction materials.",
+            Self::Woodcutter => "Unlocks automatic wood gathering from tree resource nodes.",
+            Self::Gatherer => "Unlocks automatic food gathering from forage resource nodes.",
+            Self::Road => "Marks planned paths through the settlement.",
+        }
+    }
 }
 
 pub fn building_color(kind: BuildingKind) -> Color {
