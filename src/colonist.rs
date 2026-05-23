@@ -498,7 +498,7 @@ pub fn update_colonists(
                 if let Ok(mut node) = resources.get_mut(resource) {
                     amount = GATHER_AMOUNT.min(node.amount);
                     node.amount -= amount;
-                    if node.amount <= 0 {
+                    if amount > 0 && node.amount <= 0 {
                         geometry.release_entity(resource);
                         commands.entity(resource).despawn();
                     }
