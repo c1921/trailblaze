@@ -44,7 +44,7 @@ pub struct GeneratedTerrain {
     pub resources: Vec<GeneratedResource>,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Resource, Clone, Copy, Debug)]
 pub struct TerrainGenerationConfig {
     pub seed: u64,
     pub half_cells: i32,
@@ -351,5 +351,24 @@ mod tests {
                 assert!(xz_distance(left.position, right.position) >= config.min_resource_spacing);
             }
         }
+    }
+
+    #[test]
+    fn default_generation_hits_intended_resource_counts() {
+        let config = TerrainGenerationConfig::default();
+        let terrain = generate_terrain(config);
+        let wood = terrain
+            .resources
+            .iter()
+            .filter(|resource| resource.kind == ResourceKind::Wood)
+            .count();
+        let food = terrain
+            .resources
+            .iter()
+            .filter(|resource| resource.kind == ResourceKind::Food)
+            .count();
+
+        assert_eq!(wood, config.wood_nodes);
+        assert_eq!(food, config.food_nodes);
     }
 }

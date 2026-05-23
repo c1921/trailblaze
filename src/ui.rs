@@ -6,7 +6,8 @@ use crate::{
     resources::ResourceStock,
     selection::{SelectedTarget, SelectionState},
     simulation::SimulationClock,
-    types::{BuildingKind, ResourceKind},
+    terrain::TerrainGenerationConfig,
+    types::{BuildingKind, MAP_GRID_CELLS, ResourceKind},
     world::ResourceNode,
 };
 
@@ -20,6 +21,9 @@ pub struct ResourceText;
 
 #[derive(Component)]
 pub struct StatusText;
+
+#[derive(Component)]
+pub struct TerrainDebugText;
 
 #[derive(Component)]
 pub struct SelectionTitle;
@@ -66,6 +70,26 @@ pub fn spawn_ui(mut commands: Commands) {
                 TextColor(Color::srgb(0.86, 0.9, 0.92)),
             )
         ],
+    ));
+
+    commands.spawn((
+        Node {
+            position_type: PositionType::Absolute,
+            left: px(12),
+            top: px(68),
+            width: px(470),
+            min_height: px(38),
+            display: Display::Flex,
+            align_items: AlignItems::Center,
+            padding: UiRect::axes(px(12), px(6)),
+            ..default()
+        },
+        BackgroundColor(PANEL),
+        children![(
+            TerrainDebugText,
+            Text::new("Map: 96x96  Seed: 0x0000000000000000  Nodes: Wood 0 / Food 0"),
+            TextColor(Color::srgb(0.84, 0.88, 0.9)),
+        )],
     ));
 
     commands.spawn((
@@ -199,6 +223,7 @@ pub fn handle_ui_buttons(
 pub fn update_ui_text(
     stock: Res<ResourceStock>,
     clock: Res<SimulationClock>,
+    terrain_config: Res<TerrainGenerationConfig>,
     build_state: Res<BuildState>,
     geometry: Res<WorldGeometry>,
     selection: Res<SelectionState>,
@@ -211,6 +236,7 @@ pub fn update_ui_text(
         Query<&mut Text, With<StatusText>>,
         Query<&mut Text, With<SelectionTitle>>,
         Query<&mut Text, With<SelectionBody>>,
+        Query<&mut Text, With<TerrainDebugText>>,
     )>,
 ) {
     let population = colonists.iter().count() as i32;
@@ -223,6 +249,7 @@ pub fn update_ui_text(
         .filter(|(_, colonist)| matches!(colonist.state, crate::colonist::ColonistState::Idle))
         .count();
     let (obstacles, road_obstacles, _) = geometry.summary();
+    let (wood_nodes, food_nodes) = resource_node_counts(&resource_nodes);
 
     if let Ok(mut text) = text_queries.p0().single_mut() {
         text.0 = format!(
@@ -265,6 +292,25 @@ pub fn update_ui_text(
     if let Ok(mut text) = text_queries.p3().single_mut() {
         text.0 = body;
     }
+    if let Ok(mut text) = text_queries.p4().single_mut() {
+        text.0 = format!(
+            "Map: {}x{}  Seed: 0x{:016X}  Nodes: Wood {} / Food {}",
+            MAP_GRID_CELLS, MAP_GRID_CELLS, terrain_config.seed, wood_nodes, food_nodes
+        );
+    }
+}
+
+fn resource_node_counts(resource_nodes: &Query<(Entity, &ResourceNode)>) -> (usize, usize) {
+    let mut wood = 0;
+    let mut food = 0;
+    for (_, node) in resource_nodes {
+        match node.kind {
+            ResourceKind::Wood => wood += 1,
+            ResourceKind::Food => food += 1,
+        }
+    }
+
+    (wood, food)
 }
 
 fn build_button(kind: BuildingKind) -> impl Bundle {

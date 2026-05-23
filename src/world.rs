@@ -48,6 +48,7 @@ impl GameAssets {
 
 pub fn setup_scene(
     mut commands: Commands,
+    terrain_config: Res<TerrainGenerationConfig>,
     mut geometry: ResMut<WorldGeometry>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -129,7 +130,7 @@ pub fn setup_scene(
         Transform::from_xyz(5.0, 8.0, 5.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));
 
-    let terrain = generate_terrain(TerrainGenerationConfig::default());
+    let terrain = generate_terrain(*terrain_config);
     spawn_terrain_tiles(
         &mut commands,
         &mut meshes,
