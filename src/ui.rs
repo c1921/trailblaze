@@ -11,10 +11,10 @@ use crate::{
     world::ResourceNode,
 };
 
-const PANEL: Color = Color::srgba(0.08, 0.09, 0.1, 0.82);
-const BUTTON: Color = Color::srgb(0.18, 0.2, 0.22);
-const BUTTON_HOVER: Color = Color::srgb(0.26, 0.29, 0.31);
-const BUTTON_ACTIVE: Color = Color::srgb(0.26, 0.42, 0.28);
+pub(crate) const PANEL: Color = Color::srgba(0.08, 0.09, 0.1, 0.82);
+pub(crate) const BUTTON: Color = Color::srgb(0.18, 0.2, 0.22);
+pub(crate) const BUTTON_HOVER: Color = Color::srgb(0.26, 0.29, 0.31);
+pub(crate) const BUTTON_ACTIVE: Color = Color::srgb(0.26, 0.42, 0.28);
 
 pub struct UiPlugin;
 
@@ -334,7 +334,7 @@ fn build_button(kind: BuildingKind) -> impl Bundle {
     )
 }
 
-fn utility_button<T: Component>(label: &'static str, marker: T) -> impl Bundle {
+pub(crate) fn utility_button<T: Component>(label: &'static str, marker: T) -> impl Bundle {
     (
         Button,
         marker,
@@ -354,7 +354,7 @@ fn time_button(label: &'static str, marker: TimeButton) -> impl Bundle {
     )
 }
 
-fn button_node() -> Node {
+pub(crate) fn button_node() -> Node {
     Node {
         min_width: px(72),
         height: px(34),

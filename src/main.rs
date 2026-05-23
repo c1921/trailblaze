@@ -1,6 +1,7 @@
 mod building;
 mod camera;
 mod colonist;
+mod debug_console;
 mod math;
 mod navigation;
 mod resources;
@@ -27,6 +28,7 @@ fn main() {
             selection::SelectionPlugin,
             colonist::ColonistPlugin,
             ui::UiPlugin,
+            debug_console::DebugConsolePlugin,
         ))
         .run();
 }

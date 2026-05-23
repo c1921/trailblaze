@@ -40,6 +40,8 @@ pub struct GameAssets {
     pub gatherer_material: Handle<StandardMaterial>,
     pub road_material: Handle<StandardMaterial>,
     pub entrance_material: Handle<StandardMaterial>,
+    pub colonist_mesh: Handle<Mesh>,
+    pub colonist_material: Handle<StandardMaterial>,
 }
 
 impl GameAssets {
@@ -114,6 +116,8 @@ pub fn setup_scene(
         gatherer_material: materials.add(building_color(BuildingKind::Gatherer)),
         road_material: materials.add(building_color(BuildingKind::Road)),
         entrance_material: materials.add(Color::srgb(0.95, 0.86, 0.28)),
+        colonist_mesh: colonist_mesh.clone(),
+        colonist_material: colonist_material.clone(),
     };
     commands.insert_resource(assets);
 
