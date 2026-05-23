@@ -6,6 +6,7 @@ use crate::{
     navigation::{line_of_sight_clear, path_to_waypoints, PathCache},
     resources::ResourceStock,
     simulation::SimulationClock,
+    terrain::{TerrainSeed, terrain_height},
     types::{BuildingKind, ResourceKind},
     world::ResourceNode,
 };
@@ -14,7 +15,7 @@ const MATERIAL_DELIVERY_SIZE: i32 = 4;
 const GATHER_AMOUNT: i32 = 4;
 const GATHER_SECONDS: f32 = 1.4;
 const BUILD_RATE: f32 = 1.0;
-const STOCKPILE_POSITION: Vec3 = Vec3::new(0.0, 0.0, 0.0);
+const COLONIST_HALF_HEIGHT: f32 = 0.32;
 
 pub struct ColonistPlugin;
 
@@ -98,15 +99,22 @@ impl Task {
     }
 }
 
+fn stockpile_position(seed: u64) -> Vec3 {
+    let y = terrain_height(seed, 0.0, 0.0);
+    Vec3::new(0.0, y, 0.0)
+}
+
 pub fn assign_idle_colonists(
     mut stock: ResMut<ResourceStock>,
     geometry: Res<WorldGeometry>,
+    terrain_seed: Res<TerrainSeed>,
     mut cache: ResMut<PathCache>,
     mut colonists: Query<(&mut Colonist, &Transform)>,
     blueprints: Query<(Entity, &Blueprint, &Transform, Option<&BuildingEntrance>)>,
     resources: Query<(Entity, &ResourceNode, &Transform)>,
     completed: Query<(&CompletedBuilding, &Transform, Option<&BuildingEntrance>)>,
 ) {
+    let seed = terrain_seed.0;
     let mut reserved_deliveries = active_material_deliveries(&colonists);
     let has_woodcutter = completed
         .iter()
@@ -158,7 +166,7 @@ pub fn assign_idle_colonists(
 
         let mut assigned = false;
         for (_, _, entity, wood, target, task) in &delivery_candidates {
-            if let Some((state, _)) = moving_state_to_target(&geometry, &mut *cache, start, *target, task.clone()) {
+            if let Some((state, _)) = moving_state_to_target(&geometry, &mut *cache, start, *target, task.clone(), seed) {
                 if stock.remove(ResourceKind::Wood, *wood) {
                     colonist.state = state;
                     reserved_deliveries.push((*entity, *wood));
@@ -189,7 +197,7 @@ pub fn assign_idle_colonists(
         build_candidates.sort_by(|(dist_a, ..), (dist_b, ..)| dist_a.total_cmp(dist_b));
 
         for (_, target, task) in &build_candidates {
-            if let Some((state, _)) = moving_state_to_target(&geometry, &mut *cache, start, *target, task.clone()) {
+            if let Some((state, _)) = moving_state_to_target(&geometry, &mut *cache, start, *target, task.clone(), seed) {
                 colonist.state = state;
                 assigned = true;
                 break;
@@ -201,7 +209,7 @@ pub fn assign_idle_colonists(
 
         if has_woodcutter {
             if let Some((_, state)) =
-                gather_candidate(&geometry, &mut *cache, start, ResourceKind::Wood, &resources)
+                gather_candidate(&geometry, &mut *cache, start, ResourceKind::Wood, &resources, seed)
             {
                 colonist.state = state;
                 continue;
@@ -210,7 +218,7 @@ pub fn assign_idle_colonists(
 
         if has_gatherer {
             if let Some((_, state)) =
-                gather_candidate(&geometry, &mut *cache, start, ResourceKind::Food, &resources)
+                gather_candidate(&geometry, &mut *cache, start, ResourceKind::Food, &resources, seed)
             {
                 colonist.state = state;
             }
@@ -243,6 +251,7 @@ fn gather_candidate(
     start: Vec3,
     kind: ResourceKind,
     resources: &Query<(Entity, &ResourceNode, &Transform)>,
+    seed: u64,
 ) -> Option<(usize, ColonistState)> {
     let mut candidates: Vec<(f32, Entity, Vec3)> = resources
         .iter()
@@ -268,6 +277,7 @@ fn gather_candidate(
                 resource: *resource,
                 kind,
             },
+            seed,
         ) {
             return Some(result);
         }
@@ -290,8 +300,9 @@ fn moving_state_to_target(
     start: Vec3,
     target: Vec3,
     task: Task,
+    seed: u64,
 ) -> Option<(ColonistState, usize)> {
-    let path = path_to_waypoints(geometry, cache, start, target)?;
+    let path = path_to_waypoints(geometry, cache, start, target, seed)?;
     let path_len = path.len();
 
     Some((ColonistState::Moving { target, path, task }, path_len))
@@ -303,8 +314,9 @@ fn movement_to_resource(
     start: Vec3,
     resource_position: Vec3,
     task: Task,
+    seed: u64,
 ) -> Option<(usize, ColonistState)> {
-    let mut targets: Vec<(f32, Vec3)> = resource_interaction_targets(resource_position)
+    let mut targets: Vec<(f32, Vec3)> = resource_interaction_targets(resource_position, seed)
         .into_iter()
         .filter(|target| geometry.is_walkable_point(*target))
         .map(|target| (xz_distance(start, target), target))
@@ -313,26 +325,27 @@ fn movement_to_resource(
     targets.sort_by(|(dist_a, ..), (dist_b, ..)| dist_a.total_cmp(dist_b));
 
     for (_, target) in &targets {
-        if let Some((state, path_len)) = moving_state_to_target(geometry, cache, start, *target, task.clone()) {
+        if let Some((state, path_len)) = moving_state_to_target(geometry, cache, start, *target, task.clone(), seed) {
             return Some((path_len, state));
         }
     }
     None
 }
 
-fn resource_interaction_targets(resource_position: Vec3) -> [Vec3; 8] {
+fn resource_interaction_targets(resource_position: Vec3, seed: u64) -> [Vec3; 8] {
     const RADIUS: f32 = 0.82;
     const DIAGONAL: f32 = RADIUS * 0.70710677;
-    let base = Vec3::new(resource_position.x, 0.0, resource_position.z);
+    let base_x = resource_position.x;
+    let base_z = resource_position.z;
     [
-        base + Vec3::new(RADIUS, 0.0, 0.0),
-        base + Vec3::new(-RADIUS, 0.0, 0.0),
-        base + Vec3::new(0.0, 0.0, RADIUS),
-        base + Vec3::new(0.0, 0.0, -RADIUS),
-        base + Vec3::new(DIAGONAL, 0.0, DIAGONAL),
-        base + Vec3::new(-DIAGONAL, 0.0, DIAGONAL),
-        base + Vec3::new(DIAGONAL, 0.0, -DIAGONAL),
-        base + Vec3::new(-DIAGONAL, 0.0, -DIAGONAL),
+        Vec3::new(base_x + RADIUS, terrain_height(seed, base_x + RADIUS, base_z), base_z),
+        Vec3::new(base_x - RADIUS, terrain_height(seed, base_x - RADIUS, base_z), base_z),
+        Vec3::new(base_x, terrain_height(seed, base_x, base_z + RADIUS), base_z + RADIUS),
+        Vec3::new(base_x, terrain_height(seed, base_x, base_z - RADIUS), base_z - RADIUS),
+        Vec3::new(base_x + DIAGONAL, terrain_height(seed, base_x + DIAGONAL, base_z + DIAGONAL), base_z + DIAGONAL),
+        Vec3::new(base_x - DIAGONAL, terrain_height(seed, base_x - DIAGONAL, base_z + DIAGONAL), base_z + DIAGONAL),
+        Vec3::new(base_x + DIAGONAL, terrain_height(seed, base_x + DIAGONAL, base_z - DIAGONAL), base_z - DIAGONAL),
+        Vec3::new(base_x - DIAGONAL, terrain_height(seed, base_x - DIAGONAL, base_z - DIAGONAL), base_z - DIAGONAL),
     ]
 }
 
@@ -345,6 +358,7 @@ fn deposit_moving_state(
         Without<Colonist>,
     >,
     task: Task,
+    seed: u64,
 ) -> ColonistState {
     let mut storage_targets: Vec<(f32, Vec3)> = completed
         .iter()
@@ -358,14 +372,15 @@ fn deposit_moving_state(
     storage_targets.sort_by(|(a, _), (b, _)| a.total_cmp(b));
 
     for (_, target) in &storage_targets {
-        if let Some((state, _)) = moving_state_to_target(geometry, cache, start, *target, task.clone()) {
+        if let Some((state, _)) = moving_state_to_target(geometry, cache, start, *target, task.clone(), seed) {
             return state;
         }
     }
 
+    let stockpile = stockpile_position(seed);
     if storage_targets.is_empty() {
         if let Some((state, _)) =
-            moving_state_to_target(geometry, cache, start, STOCKPILE_POSITION, task.clone())
+            moving_state_to_target(geometry, cache, start, stockpile, task.clone(), seed)
         {
             return state;
         }
@@ -374,7 +389,7 @@ fn deposit_moving_state(
     let fallback_target = storage_targets
         .first()
         .map(|(_, t)| *t)
-        .unwrap_or(STOCKPILE_POSITION);
+        .unwrap_or(stockpile);
     ColonistState::Moving {
         target: fallback_target,
         path: Vec::new(),
@@ -386,6 +401,7 @@ pub fn update_colonists(
     mut commands: Commands,
     time: Res<Time>,
     clock: Res<SimulationClock>,
+    terrain_seed: Res<TerrainSeed>,
     mut geometry: ResMut<WorldGeometry>,
     mut cache: ResMut<PathCache>,
     mut stock: ResMut<ResourceStock>,
@@ -397,6 +413,7 @@ pub fn update_colonists(
         Without<Colonist>,
     >,
 ) {
+    let seed = terrain_seed.0;
     let dt = clock.scaled_delta(&time);
     if dt == 0.0 {
         return;
@@ -436,6 +453,7 @@ pub fn update_colonists(
                         transform.translation,
                         target,
                         task.clone(),
+                        seed,
                     ) {
                         if let ColonistState::Moving {
                             path: rebuilt_path, ..
@@ -444,12 +462,12 @@ pub fn update_colonists(
                             path = rebuilt_path;
                         }
                     } else {
-                        colonist.state = unreachable_moving_state(target, task, &mut stock);
+                        colonist.state = unreachable_moving_state(target, task, &mut stock, seed);
                         continue;
                     }
                 }
 
-                if move_along_path(&mut transform, target, &mut path, colonist.speed, dt) {
+                if move_along_path(&mut transform, target, &mut path, colonist.speed, dt, seed) {
                     match task {
                         Task::DeliverMaterial { blueprint, wood } => {
                             if let Ok(mut blueprint) = blueprints.get_mut(blueprint) {
@@ -511,6 +529,7 @@ pub fn update_colonists(
                         transform.translation,
                         &completed,
                         Task::Deposit { kind, amount },
+                        seed,
                     );
                 } else {
                     colonist.state = ColonistState::Idle;
@@ -557,7 +576,7 @@ fn path_needs_rebuild(
         .any(|w| !line_of_sight_clear(geometry, w[0], w[1]))
 }
 
-fn unreachable_moving_state(target: Vec3, task: Task, stock: &mut ResourceStock) -> ColonistState {
+fn unreachable_moving_state(target: Vec3, task: Task, stock: &mut ResourceStock, _seed: u64) -> ColonistState {
     match task {
         Task::Deposit { .. } => ColonistState::Moving {
             target,
@@ -578,9 +597,10 @@ fn move_along_path(
     path: &mut Vec<Vec3>,
     speed: f32,
     dt: f32,
+    seed: u64,
 ) -> bool {
     let waypoint = path.first().copied().unwrap_or(target);
-    if move_toward(transform, waypoint, speed, dt) {
+    if move_toward(transform, waypoint, speed, dt, seed) {
         if !path.is_empty() {
             path.remove(0);
         }
@@ -590,23 +610,28 @@ fn move_along_path(
     false
 }
 
-fn move_toward(transform: &mut Transform, target: Vec3, speed: f32, dt: f32) -> bool {
-    let target = Vec3::new(target.x, transform.translation.y, target.z);
+fn move_toward(transform: &mut Transform, target: Vec3, speed: f32, dt: f32, seed: u64) -> bool {
     let to_target = target - transform.translation;
-    let distance = to_target.length();
-    if distance <= 0.05 {
-        transform.translation = target;
+    let xz_dist = (to_target.x * to_target.x + to_target.z * to_target.z).sqrt();
+    if xz_dist <= 0.05 {
+        let ground_y = terrain_height(seed, target.x, target.z) + COLONIST_HALF_HEIGHT;
+        transform.translation = Vec3::new(target.x, ground_y, target.z);
         return true;
     }
 
     let step = speed * dt;
-    if step >= distance {
-        transform.translation = target;
+    if step >= xz_dist {
+        let ground_y = terrain_height(seed, target.x, target.z) + COLONIST_HALF_HEIGHT;
+        transform.translation = Vec3::new(target.x, ground_y, target.z);
         true
     } else {
-        let direction = to_target / distance;
-        transform.translation += direction * step;
-        let yaw = direction.x.atan2(direction.z);
+        let dir_x = to_target.x / xz_dist;
+        let dir_z = to_target.z / xz_dist;
+        let new_x = transform.translation.x + dir_x * step;
+        let new_z = transform.translation.z + dir_z * step;
+        let ground_y = terrain_height(seed, new_x, new_z) + COLONIST_HALF_HEIGHT;
+        transform.translation = Vec3::new(new_x, ground_y, new_z);
+        let yaw = dir_x.atan2(dir_z);
         transform.rotation = Quat::from_rotation_y(yaw);
         false
     }
@@ -615,21 +640,31 @@ fn move_toward(transform: &mut Transform, target: Vec3, speed: f32, dt: f32) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::terrain::DEFAULT_TERRAIN_SEED;
+
+    const SEED: u64 = DEFAULT_TERRAIN_SEED;
 
     #[test]
     fn move_along_path_advances_one_waypoint_at_a_time() {
-        let mut transform = Transform::from_translation(Vec3::ZERO);
-        let target = Vec3::new(2.0, 0.0, 0.0);
-        let mut path = vec![Vec3::new(1.0, 0.0, 0.0), target];
+        let mut transform = Transform::from_translation(Vec3::new(
+            0.0,
+            terrain_height(SEED, 0.0, 0.0) + COLONIST_HALF_HEIGHT,
+            0.0,
+        ));
+        let ty = terrain_height(SEED, 2.0, 0.0) + COLONIST_HALF_HEIGHT;
+        let target = Vec3::new(2.0, ty, 0.0);
+        let wy = terrain_height(SEED, 1.0, 0.0) + COLONIST_HALF_HEIGHT;
+        let mut path = vec![Vec3::new(1.0, wy, 0.0), target];
 
         assert!(!move_along_path(
             &mut transform,
             target,
             &mut path,
             10.0,
-            0.1
+            0.1,
+            SEED,
         ));
-        assert_eq!(transform.translation, Vec3::new(1.0, 0.0, 0.0));
+        assert!((transform.translation.x - 1.0).abs() < 0.01);
         assert_eq!(path, vec![target]);
 
         assert!(move_along_path(
@@ -637,9 +672,10 @@ mod tests {
             target,
             &mut path,
             10.0,
-            0.1
+            0.1,
+            SEED,
         ));
-        assert_eq!(transform.translation, target);
+        assert!((transform.translation.x - target.x).abs() < 0.01);
         assert!(path.is_empty());
     }
 
@@ -654,6 +690,7 @@ mod tests {
                 amount: 3,
             },
             &mut stock,
+            SEED,
         );
 
         assert!(matches!(
@@ -679,6 +716,7 @@ mod tests {
                 wood: 4,
             },
             &mut stock,
+            SEED,
         );
 
         assert!(matches!(state, ColonistState::Idle));

@@ -1,10 +1,12 @@
 use bevy::{prelude::*, window::PrimaryWindow};
 
 use crate::{
+    math::ray_terrain_intersection,
+    terrain::{TerrainGenerationConfig, terrain_height},
     types::{
         BuildingKind, CELL_SIZE, entrance_local_offset, entrance_world_position, snap_to_grid,
     },
-    world::{GameAssets, Ground},
+    world::GameAssets,
 };
 
 use super::lifecycle::{
@@ -20,9 +22,9 @@ pub fn update_build_preview(
     mut commands: Commands,
     windows: Query<&Window, With<PrimaryWindow>>,
     camera_query: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
-    ground_query: Query<&GlobalTransform, With<Ground>>,
     assets: Option<Res<GameAssets>>,
     geometry: Res<WorldGeometry>,
+    terrain_config: Res<TerrainGenerationConfig>,
     mut build_state: ResMut<BuildState>,
     mut preview_query: Query<
         (Entity, &mut Transform, &mut Visibility),
@@ -44,7 +46,8 @@ pub fn update_build_preview(
         return;
     };
 
-    let Some(cursor_world) = cursor_ground_position(&windows, &camera_query, &ground_query) else {
+    let Some(cursor_world) = cursor_ground_position(&windows, &camera_query, terrain_config.seed)
+    else {
         hide_preview(&mut build_state, &mut preview_query);
         hide_entrance_preview(&mut commands, &mut build_state);
         return;
@@ -61,15 +64,19 @@ pub fn update_build_preview(
     } else {
         position
     };
+
+    let terrain_y = terrain_height(terrain_config.seed, snapped_position.x, snapped_position.z);
+    let building_position = Vec3::new(snapped_position.x, terrain_y, snapped_position.z);
+
     let polygon = footprint_polygon(
         kind,
-        snapped_position,
+        building_position,
         definition.size,
         build_state.rotation_angle,
     );
     let entrance = planned_entrance(
         kind,
-        snapped_position,
+        building_position,
         definition.size,
         build_state.rotation_angle,
     );
@@ -77,13 +84,15 @@ pub fn update_build_preview(
         &polygon,
         entrance.map(|entrance| entrance.world_position),
         kind != BuildingKind::Road,
+        terrain_config.seed,
+        terrain_config.max_buildable_slope,
     );
     let valid = placement_issue.is_none();
     let invalid_reason = if valid { None } else { placement_issue };
 
     build_state.last_valid = valid;
     build_state.invalid_reason = invalid_reason;
-    build_state.last_position = snapped_position;
+    build_state.last_position = building_position;
     build_state.last_polygon = polygon;
     let reason_label = invalid_reason
         .map(PlacementIssue::label)
@@ -159,6 +168,7 @@ pub fn place_blueprint(
     mouse_buttons: Res<ButtonInput<MouseButton>>,
     button_interactions: Query<&Interaction, With<Button>>,
     assets: Option<Res<GameAssets>>,
+    terrain_config: Res<TerrainGenerationConfig>,
     mut geometry: ResMut<WorldGeometry>,
     mut build_state: ResMut<BuildState>,
 ) {
@@ -194,6 +204,8 @@ pub fn place_blueprint(
         &polygon,
         entrance.map(|entrance| entrance.world_position),
         kind != BuildingKind::Road,
+        terrain_config.seed,
+        terrain_config.max_buildable_slope,
     ) {
         build_state.status = format!("Cannot place {}: {}.", definition.label, issue.label());
         build_state.last_valid = false;
@@ -271,17 +283,16 @@ fn hide_entrance_preview(commands: &mut Commands, build_state: &mut BuildState) 
 fn cursor_ground_position(
     windows: &Query<&Window, With<PrimaryWindow>>,
     camera_query: &Query<(&Camera, &GlobalTransform), With<Camera3d>>,
-    ground_query: &Query<&GlobalTransform, With<Ground>>,
+    seed: u64,
 ) -> Option<Vec3> {
     let window = windows.single().ok()?;
     let cursor_position = window.cursor_position()?;
     let (camera, camera_transform) = camera_query.single().ok()?;
-    let ground = ground_query.single().ok()?;
     let ray = camera
         .viewport_to_world(camera_transform, cursor_position)
         .ok()?;
 
-    ray.plane_intersection_point(ground.translation(), InfinitePlane3d::new(ground.up()))
+    ray_terrain_intersection(ray, seed, 200.0)
 }
 
 fn preview_scale(kind: BuildingKind, size: IVec2, height: f32) -> Vec3 {
@@ -407,6 +418,7 @@ mod tests {
                 &mut crate::navigation::PathCache::default(),
                 Vec3::new(-1.2, 0.0, 1.0),
                 entrance.world_position,
+                crate::terrain::DEFAULT_TERRAIN_SEED,
             )
             .is_some()
         );

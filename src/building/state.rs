@@ -40,6 +40,7 @@ pub enum PlacementIssue {
     OutOfBounds,
     Occupied,
     EntranceBlocked,
+    TooSteep,
 }
 
 impl PlacementIssue {
@@ -48,6 +49,7 @@ impl PlacementIssue {
             Self::OutOfBounds => "outside the buildable area",
             Self::Occupied => "blocked by another plan, building, resource, or entrance",
             Self::EntranceBlocked => "the entrance is blocked",
+            Self::TooSteep => "the terrain is too steep",
         }
     }
 }

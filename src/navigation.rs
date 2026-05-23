@@ -4,10 +4,12 @@ use bevy::prelude::*;
 
 use crate::building::{WorldGeometry, expanded_polygon};
 use crate::math::{xz, xz_distance};
+use crate::terrain::terrain_height;
 
 const AGENT_RADIUS: f32 = 0.08;
 const VISIBILITY_NODE_MARGIN: f32 = 0.16;
 const NODE_DEDUP_DISTANCE: f32 = 0.05;
+const SLOPE_COST_FACTOR: f32 = 1.5;
 
 const CACHE_GRID: f32 = 0.5;
 
@@ -70,6 +72,7 @@ pub fn path_to_waypoints(
     cache: &mut PathCache,
     start: Vec3,
     target: Vec3,
+    seed: u64,
 ) -> Option<Vec<Vec3>> {
     let key = (
         snap_to_cache_grid(start.x),
@@ -82,12 +85,12 @@ pub fn path_to_waypoints(
         return cached.clone();
     }
 
-    let result = compute_path(geometry, start, target);
+    let result = compute_path(geometry, start, target, seed);
     cache.cache.insert(key, result.clone());
     result
 }
 
-fn compute_path(geometry: &WorldGeometry, start: Vec3, target: Vec3) -> Option<Vec<Vec3>> {
+fn compute_path(geometry: &WorldGeometry, start: Vec3, target: Vec3, seed: u64) -> Option<Vec<Vec3>> {
     let target = Vec3::new(target.x, start.y, target.z);
     if xz_distance(start, target) < 0.001 {
         return Some(Vec::new());
@@ -96,7 +99,8 @@ fn compute_path(geometry: &WorldGeometry, start: Vec3, target: Vec3) -> Option<V
         return None;
     }
     if geometry.segment_clear(start, target, AGENT_RADIUS) {
-        return Some(vec![target]);
+        let y = terrain_height(seed, target.x, target.z);
+        return Some(vec![Vec3::new(target.x, y, target.z)]);
     }
 
     let start_2d = xz(start);
@@ -108,27 +112,31 @@ fn compute_path(geometry: &WorldGeometry, start: Vec3, target: Vec3) -> Option<V
         .filter(|obstacle| !obstacle.passable)
     {
         for node in expanded_polygon(&obstacle.polygon, AGENT_RADIUS + VISIBILITY_NODE_MARGIN) {
-            if geometry.is_walkable_point(Vec3::new(node.x, start.y, node.y)) {
+            let y = terrain_height(seed, node.x, node.y);
+            if geometry.is_walkable_point(Vec3::new(node.x, y, node.y)) {
                 push_unique_node(&mut nodes, node);
             }
         }
     }
 
-    let path_indices = visibility_graph_a_star(geometry, &nodes)?;
+    let path_indices = visibility_graph_a_star(geometry, &nodes, seed)?;
     let mut waypoints: Vec<Vec3> = path_indices
         .into_iter()
         .skip(1)
         .map(|index| {
             if index == 1 {
-                target
+                let y = terrain_height(seed, target.x, target.z);
+                Vec3::new(target.x, y, target.z)
             } else {
-                Vec3::new(nodes[index].x, start.y, nodes[index].y)
+                let y = terrain_height(seed, nodes[index].x, nodes[index].y);
+                Vec3::new(nodes[index].x, y, nodes[index].y)
             }
         })
         .collect();
 
-    if waypoints.last().copied() != Some(target) {
-        waypoints.push(target);
+    let final_target = Vec3::new(target.x, terrain_height(seed, target.x, target.z), target.z);
+    if waypoints.last().copied() != Some(final_target) {
+        waypoints.push(final_target);
     }
     Some(waypoints)
 }
@@ -137,7 +145,11 @@ pub fn line_of_sight_clear(geometry: &WorldGeometry, from: Vec3, to: Vec3) -> bo
     geometry.segment_clear(from, to, AGENT_RADIUS)
 }
 
-fn visibility_graph_a_star(geometry: &WorldGeometry, nodes: &[Vec2]) -> Option<Vec<usize>> {
+fn visibility_graph_a_star(
+    geometry: &WorldGeometry,
+    nodes: &[Vec2],
+    seed: u64,
+) -> Option<Vec<usize>> {
     let goal = 1usize;
     let mut frontier = BinaryHeap::new();
     let mut came_from = vec![None; nodes.len()];
@@ -165,7 +177,12 @@ fn visibility_graph_a_star(geometry: &WorldGeometry, nodes: &[Vec2]) -> Option<V
                 continue;
             }
 
-            let next_cost = current.cost + nodes[current.index].distance(nodes[next]);
+            let xz_dist = nodes[current.index].distance(nodes[next]);
+            let h_current = terrain_height(seed, nodes[current.index].x, nodes[current.index].y);
+            let h_next = terrain_height(seed, nodes[next].x, nodes[next].y);
+            let slope_cost = (h_next - h_current).abs() * SLOPE_COST_FACTOR;
+            let next_cost = current.cost + xz_dist + slope_cost;
+
             if next_cost < costs[next] {
                 costs[next] = next_cost;
                 came_from[next] = Some(current.index);
@@ -210,6 +227,9 @@ fn push_unique_node(nodes: &mut Vec<Vec2>, node: Vec2) {
 mod tests {
     use super::*;
     use crate::building::{WorldGeometry, rectangle_polygon};
+    use crate::terrain::DEFAULT_TERRAIN_SEED;
+
+    const SEED: u64 = DEFAULT_TERRAIN_SEED;
 
     fn test_entity(index: u32) -> Entity {
         Entity::from_raw_u32(index).unwrap()
@@ -218,10 +238,12 @@ mod tests {
     #[test]
     fn empty_ground_returns_direct_continuous_target() {
         let geometry = WorldGeometry::default();
-        let target = Vec3::new(4.7, 0.0, 2.2);
+        let start = Vec3::new(0.2, terrain_height(SEED, 0.2, 0.3), 0.3);
+        let target_y = terrain_height(SEED, 4.7, 2.2);
+        let target = Vec3::new(4.7, target_y, 2.2);
 
         let mut cache = PathCache::default();
-        let path = path_to_waypoints(&geometry, &mut cache, Vec3::new(0.2, 0.0, 0.3), target).unwrap();
+        let path = path_to_waypoints(&geometry, &mut cache, start, target, SEED).unwrap();
 
         assert_eq!(path, vec![target]);
     }
@@ -251,17 +273,21 @@ mod tests {
             false,
         );
 
+        let start = Vec3::new(0.0, terrain_height(SEED, 0.0, 0.13), 0.13);
+        let target = Vec3::new(3.2, terrain_height(SEED, 3.2, 0.73), 0.73);
+
         let mut cache = PathCache::default();
         let path = path_to_waypoints(
             &geometry,
             &mut cache,
-            Vec3::new(0.0, 0.0, 0.13),
-            Vec3::new(3.2, 0.0, 0.73),
+            start,
+            target,
+            SEED,
         )
         .unwrap();
 
         assert!(path.len() >= 2);
-        assert_eq!(path.last().copied(), Some(Vec3::new(3.2, 0.0, 0.73)));
+        assert_eq!(path.last().copied(), Some(target));
         assert!(
             path.iter().any(|point| {
                 (point.x.fract().abs() > 0.001) && (point.z.fract().abs() > 0.001)
@@ -278,9 +304,10 @@ mod tests {
             true,
         );
 
-        let target = Vec3::new(2.0, 0.0, 0.0);
+        let start = Vec3::new(0.0, terrain_height(SEED, 0.0, 0.0), 0.0);
+        let target = Vec3::new(2.0, terrain_height(SEED, 2.0, 0.0), 0.0);
         let mut cache = PathCache::default();
-        let path = path_to_waypoints(&geometry, &mut cache, Vec3::ZERO, target).unwrap();
+        let path = path_to_waypoints(&geometry, &mut cache, start, target, SEED).unwrap();
 
         assert_eq!(path, vec![target]);
     }

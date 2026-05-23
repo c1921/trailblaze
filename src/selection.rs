@@ -3,9 +3,10 @@ use bevy::{prelude::*, window::PrimaryWindow};
 use crate::{
     building::{Blueprint, BuildState, CompletedBuilding},
     colonist::Colonist,
-    math::xz_distance,
+    math::{ray_terrain_intersection, xz_distance},
+    terrain::TerrainGenerationConfig,
     types::{BuildingKind, CELL_SIZE},
-    world::{Ground, ResourceNode},
+    world::ResourceNode,
 };
 
 pub struct SelectionPlugin;
@@ -53,7 +54,7 @@ pub fn select_target(
     mouse_buttons: Res<ButtonInput<MouseButton>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     camera_query: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
-    ground_query: Query<&GlobalTransform, With<Ground>>,
+    terrain_config: Res<TerrainGenerationConfig>,
     button_interactions: Query<&Interaction, With<Button>>,
     build_state: Res<BuildState>,
     mut selection: ResMut<SelectionState>,
@@ -78,7 +79,8 @@ pub fn select_target(
         return;
     }
 
-    let Some(cursor_world) = cursor_ground_position(&windows, &camera_query, &ground_query) else {
+    let Some(cursor_world) = cursor_ground_position(&windows, &camera_query, terrain_config.seed)
+    else {
         return;
     };
 
@@ -115,7 +117,7 @@ pub fn draw_selection_highlight(
 
     gizmos.circle(
         Isometry3d::new(
-            Vec3::new(position.x, 0.08, position.z),
+            Vec3::new(position.x, position.y + 0.08, position.z),
             Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
         ),
         radius,
@@ -240,17 +242,16 @@ fn selected_position_and_radius(
 fn cursor_ground_position(
     windows: &Query<&Window, With<PrimaryWindow>>,
     camera_query: &Query<(&Camera, &GlobalTransform), With<Camera3d>>,
-    ground_query: &Query<&GlobalTransform, With<Ground>>,
+    seed: u64,
 ) -> Option<Vec3> {
     let window = windows.single().ok()?;
     let cursor_position = window.cursor_position()?;
     let (camera, camera_transform) = camera_query.single().ok()?;
-    let ground = ground_query.single().ok()?;
     let ray = camera
         .viewport_to_world(camera_transform, cursor_position)
         .ok()?;
 
-    ray.plane_intersection_point(ground.translation(), InfinitePlane3d::new(ground.up()))
+    ray_terrain_intersection(ray, seed, 200.0)
 }
 
 fn point_in_building_box(

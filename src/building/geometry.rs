@@ -1,6 +1,7 @@
 use bevy::prelude::*;
 
 use crate::math::{within_world_bounds, xz};
+use crate::terrain::max_slope_in_polygon;
 
 use super::PlacementIssue;
 use super::polygon::{
@@ -54,6 +55,18 @@ impl WorldGeometry {
         entrance: Option<IVec2>,
         block_reserved_entrances: bool,
     ) -> Option<PlacementIssue> {
+        self.placement_issue_for_with_slope(cells, entrance, block_reserved_entrances, 0, 0.58)
+    }
+
+    #[cfg(test)]
+    pub fn placement_issue_for_with_slope(
+        &self,
+        cells: &[IVec2],
+        entrance: Option<IVec2>,
+        block_reserved_entrances: bool,
+        _seed: u64,
+        _max_slope: f32,
+    ) -> Option<PlacementIssue> {
         if cells.iter().any(|cell| !within_map(*cell)) {
             return Some(PlacementIssue::OutOfBounds);
         }
@@ -96,6 +109,8 @@ impl WorldGeometry {
         polygon: &[Vec2],
         entrance: Option<Vec3>,
         block_reserved_entrances: bool,
+        seed: u64,
+        max_slope: f32,
     ) -> Option<PlacementIssue> {
         if polygon.iter().any(|point| !within_world_bounds(*point)) {
             return Some(PlacementIssue::OutOfBounds);
@@ -129,6 +144,11 @@ impl WorldGeometry {
             {
                 return Some(PlacementIssue::EntranceBlocked);
             }
+        }
+
+        let slope = max_slope_in_polygon(seed, polygon, 8);
+        if slope > max_slope {
+            return Some(PlacementIssue::TooSteep);
         }
 
         None
@@ -351,7 +371,7 @@ mod tests {
         geometry.occupy_polygon(first, entity, false);
 
         assert_eq!(
-            geometry.placement_issue_for_polygon(&overlapping, None, true),
+            geometry.placement_issue_for_polygon(&overlapping, None, true, 0, 0.58),
             Some(PlacementIssue::Occupied)
         );
     }

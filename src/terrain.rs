@@ -19,13 +19,24 @@ const FOREST_SALT: u64 = 0x464F_5245_5354;
 const FORAGE_SALT: u64 = 0x464F_5241_4745;
 const JITTER_SALT: u64 = 0x4A49_5454_4552;
 
+const HEIGHT_SALT: u64 = 0x4845_4947_4854;
+const DEFAULT_HEIGHT_AMPLITUDE: f32 = 2.0;
+const DEFAULT_HEIGHT_FREQUENCY: f32 = 0.025;
+const DEFAULT_MAX_BUILDABLE_SLOPE: f32 = 0.58;
+
 pub struct TerrainPlugin;
 
 impl Plugin for TerrainPlugin {
     fn build(&self, app: &mut App) {
+        let config = TerrainGenerationConfig::default();
+        let seed = TerrainSeed(config.seed);
         app.init_resource::<TerrainGenerationConfig>();
+        app.insert_resource(seed);
     }
 }
+
+#[derive(Resource, Clone, Copy, Debug)]
+pub struct TerrainSeed(pub u64);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TerrainKind {
@@ -38,6 +49,8 @@ pub enum TerrainKind {
 pub struct TerrainTile {
     pub center: Vec3,
     pub kind: TerrainKind,
+    pub height: f32,
+    pub slope: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -63,6 +76,11 @@ pub struct TerrainGenerationConfig {
     pub start_clear_radius: f32,
     pub edge_margin_cells: i32,
     pub min_resource_spacing: f32,
+    #[allow(dead_code)]
+    pub height_amplitude: f32,
+    #[allow(dead_code)]
+    pub height_frequency: f32,
+    pub max_buildable_slope: f32,
 }
 
 impl Default for TerrainGenerationConfig {
@@ -76,8 +94,42 @@ impl Default for TerrainGenerationConfig {
             start_clear_radius: START_CLEAR_RADIUS,
             edge_margin_cells: EDGE_MARGIN_CELLS,
             min_resource_spacing: MIN_RESOURCE_SPACING,
+            height_amplitude: DEFAULT_HEIGHT_AMPLITUDE,
+            height_frequency: DEFAULT_HEIGHT_FREQUENCY,
+            max_buildable_slope: DEFAULT_MAX_BUILDABLE_SLOPE,
         }
     }
+}
+
+pub fn terrain_height(seed: u64, x: f32, z: f32) -> f32 {
+    (fractal_noise(seed, x, z, DEFAULT_HEIGHT_FREQUENCY, HEIGHT_SALT) * 2.0 - 1.0)
+        * DEFAULT_HEIGHT_AMPLITUDE
+}
+
+pub fn terrain_slope(seed: u64, x: f32, z: f32, sample_dist: f32) -> f32 {
+    let h = terrain_height(seed, x, z);
+    let hx = terrain_height(seed, x + sample_dist, z);
+    let hz = terrain_height(seed, x, z + sample_dist);
+    let dx = (hx - h) / sample_dist;
+    let dz = (hz - h) / sample_dist;
+    (dx * dx + dz * dz).sqrt()
+}
+
+pub fn max_slope_in_polygon(seed: u64, polygon: &[Vec2], sample_count: usize) -> f32 {
+    if polygon.len() < 3 {
+        return 0.0;
+    }
+    let mut max_slope = 0.0f32;
+    let sample_dist = 0.3;
+    for i in 0..sample_count {
+        let t = i as f32 / (sample_count as f32).max(1.0);
+        let idx = (t * polygon.len() as f32) as usize % polygon.len();
+        let next = (idx + 1) % polygon.len();
+        let p = polygon[idx].lerp(polygon[next], t - (t * polygon.len() as f32).floor());
+        let s = terrain_slope(seed, p.x, p.y, sample_dist);
+        max_slope = max_slope.max(s);
+    }
+    max_slope
 }
 
 pub fn generate_terrain(config: TerrainGenerationConfig) -> GeneratedTerrain {
@@ -108,15 +160,17 @@ fn generate_tiles(config: TerrainGenerationConfig) -> Vec<TerrainTile> {
 
     for x in 0..tiles_per_axis {
         for z in 0..tiles_per_axis {
-            let center = Vec3::new(
-                start + (x as f32 + 0.5) * tile_size,
-                0.0,
-                start + (z as f32 + 0.5) * tile_size,
-            );
+            let center_x = start + (x as f32 + 0.5) * tile_size;
+            let center_z = start + (z as f32 + 0.5) * tile_size;
+            let height = terrain_height(config.seed, center_x, center_z);
+            let slope = terrain_slope(config.seed, center_x, center_z, 0.5);
+            let center = Vec3::new(center_x, height, center_z);
             let (forest, forage) = terrain_scores(config.seed, center.x, center.z);
             tiles.push(TerrainTile {
                 center,
                 kind: classify_terrain(forest, forage),
+                height,
+                slope,
             });
         }
     }
@@ -146,9 +200,10 @@ fn select_resources(
             continue;
         }
 
+        let y = terrain_height(config.seed, candidate.position.x, candidate.position.z);
         resources.push(GeneratedResource {
             kind,
-            position: candidate.position,
+            position: Vec3::new(candidate.position.x, y, candidate.position.z),
             amount: resource_amount(kind),
         });
         if resources
@@ -371,5 +426,39 @@ mod tests {
 
         assert_eq!(wood, config.wood_nodes);
         assert_eq!(food, config.food_nodes);
+    }
+
+    #[test]
+    fn terrain_height_is_deterministic() {
+        let seed = 0x5452_4149_4C42_4C5A;
+        let h1 = terrain_height(seed, 10.0, 20.0);
+        let h2 = terrain_height(seed, 10.0, 20.0);
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn terrain_height_varies_with_position() {
+        let seed = 0x5452_4149_4C42_4C5A;
+        let h1 = terrain_height(seed, 0.0, 0.0);
+        let h2 = terrain_height(seed, 60.0, 60.0);
+        assert!((h1 - h2).abs() > 0.01, "height should vary more: {h1} vs {h2}");
+    }
+
+    #[test]
+    fn terrain_slope_returns_zero_on_flat_extreme() {
+        let seed = 0x5452_4149_4C42_4C5A;
+        let slope = terrain_slope(seed, 0.0, 0.0, 0.5);
+        assert!(slope >= 0.0);
+    }
+
+    #[test]
+    fn generated_tiles_have_height_and_slope() {
+        let config = TerrainGenerationConfig::default();
+        let terrain = generate_terrain(config);
+        for tile in &terrain.tiles {
+            assert!(tile.height.is_finite());
+            assert!(tile.slope.is_finite());
+            assert!(tile.slope >= 0.0);
+        }
     }
 }

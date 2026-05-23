@@ -5,6 +5,7 @@ use bevy::{
     prelude::*,
 };
 
+use crate::terrain::terrain_height;
 use crate::types::{MAP_BUILD_HALF_EXTENT, MAP_GRID_CELLS};
 
 const GRID_SPACING: f32 = 1.0;
@@ -51,8 +52,16 @@ impl Default for OrbitCamera {
     }
 }
 
-pub fn spawn_camera(commands: &mut Commands) {
-    let orbit_camera = OrbitCamera::default();
+impl OrbitCamera {
+    fn with_focus_y(mut self, y: f32) -> Self {
+        self.focus.y = y;
+        self
+    }
+}
+
+pub fn spawn_camera(commands: &mut Commands, seed: u64) {
+    let center_height = terrain_height(seed, 0.0, 0.0);
+    let orbit_camera = OrbitCamera::default().with_focus_y(center_height + 0.5);
     let mut transform = Transform::default();
     sync_camera_transform(&orbit_camera, &mut transform);
 
