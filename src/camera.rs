@@ -5,17 +5,14 @@ use bevy::{
     prelude::*,
 };
 
-use crate::terrain::terrain_height;
-use crate::types::{MAP_BUILD_HALF_EXTENT, MAP_GRID_CELLS};
-
-const GRID_SPACING: f32 = 1.0;
-const GRID_AXIS_Y: f32 = 0.02;
+use crate::terrain::{TerrainSeed, terrain_height};
+use crate::types::MAP_BUILD_HALF_EXTENT;
 
 pub struct CameraPlugin;
 
 impl Plugin for CameraPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, (control_camera, draw_grid));
+        app.add_systems(Update, control_camera);
     }
 }
 
@@ -45,7 +42,7 @@ impl Default for OrbitCamera {
             pan_sensitivity: 0.0025,
             zoom_sensitivity: 0.14,
             min_radius: 4.0,
-            max_radius: 90.0,
+            max_radius: 240.0,
             min_pitch: 0.18,
             max_pitch: FRAC_PI_2 - 0.08,
         }
@@ -68,31 +65,11 @@ pub fn spawn_camera(commands: &mut Commands, seed: u64) {
     commands.spawn((Camera3d::default(), transform, orbit_camera));
 }
 
-pub fn draw_grid(mut gizmos: Gizmos) {
-    gizmos.grid(
-        Isometry3d::new(Vec3::Y * GRID_AXIS_Y, Quat::from_rotation_x(FRAC_PI_2)),
-        UVec2::splat(MAP_GRID_CELLS),
-        Vec2::splat(GRID_SPACING),
-        LinearRgba::gray(0.45),
-    );
-
-    let half_extent = MAP_GRID_CELLS as f32 * GRID_SPACING * 0.5;
-    gizmos.line(
-        Vec3::new(-half_extent, GRID_AXIS_Y, 0.0),
-        Vec3::new(half_extent, GRID_AXIS_Y, 0.0),
-        LinearRgba::rgb(0.9, 0.16, 0.14),
-    );
-    gizmos.line(
-        Vec3::new(0.0, GRID_AXIS_Y, -half_extent),
-        Vec3::new(0.0, GRID_AXIS_Y, half_extent),
-        LinearRgba::rgb(0.16, 0.35, 0.95),
-    );
-}
-
 pub fn control_camera(
     mouse_buttons: Res<ButtonInput<MouseButton>>,
     mouse_motion: Res<AccumulatedMouseMotion>,
     mouse_scroll: Res<AccumulatedMouseScroll>,
+    terrain_seed: Res<TerrainSeed>,
     mut camera_query: Query<(&mut OrbitCamera, &mut Transform)>,
 ) {
     let Ok((mut camera, mut transform)) = camera_query.single_mut() else {
@@ -130,6 +107,7 @@ pub fn control_camera(
         camera.radius = (camera.radius * zoom_factor).clamp(camera.min_radius, camera.max_radius);
     }
 
+    camera.focus.y = terrain_height(terrain_seed.0, camera.focus.x, camera.focus.z) + 0.5;
     sync_camera_transform(&camera, &mut transform);
 }
 

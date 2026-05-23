@@ -1,8 +1,8 @@
 use bevy::prelude::*;
 
 pub const CELL_SIZE: f32 = 1.0;
-pub const MAP_HALF_CELLS: i32 = 48;
-pub const MAP_GRID_CELLS: u32 = 96;
+pub const MAP_HALF_CELLS: i32 = 216;
+pub const MAP_GRID_CELLS: u32 = (MAP_HALF_CELLS * 2) as u32;
 pub const MAP_BUILD_HALF_EXTENT: f32 = (MAP_HALF_CELLS as f32 + 0.5) * CELL_SIZE;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]

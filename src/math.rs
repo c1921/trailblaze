@@ -23,13 +23,17 @@ pub fn within_world_bounds(point: Vec2) -> bool {
 }
 
 const RAY_STEP: f32 = 0.5;
-const RAY_MAX_STEPS: usize = 300;
 const BINARY_REFINE_ITERATIONS: usize = 6;
+
+pub fn terrain_pick_max_distance() -> f32 {
+    MAP_BUILD_HALF_EXTENT * 4.0
+}
 
 pub fn ray_terrain_intersection(ray: Ray3d, seed: u64, max_distance: f32) -> Option<Vec3> {
     let mut t = 0.0;
+    let max_steps = (max_distance.max(0.0) / RAY_STEP).ceil() as usize;
 
-    for _ in 0..RAY_MAX_STEPS {
+    for _ in 0..=max_steps {
         if t > max_distance {
             break;
         }

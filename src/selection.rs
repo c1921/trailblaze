@@ -3,7 +3,7 @@ use bevy::{prelude::*, window::PrimaryWindow};
 use crate::{
     building::{Blueprint, BuildState, CompletedBuilding},
     colonist::Colonist,
-    math::{ray_terrain_intersection, xz_distance},
+    math::{ray_terrain_intersection, terrain_pick_max_distance, xz_distance},
     terrain::TerrainGenerationConfig,
     types::{BuildingKind, CELL_SIZE},
     world::ResourceNode,
@@ -251,7 +251,7 @@ fn cursor_ground_position(
         .viewport_to_world(camera_transform, cursor_position)
         .ok()?;
 
-    ray_terrain_intersection(ray, seed, 200.0)
+    ray_terrain_intersection(ray, seed, terrain_pick_max_distance())
 }
 
 fn point_in_building_box(

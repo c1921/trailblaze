@@ -1,12 +1,12 @@
-use bevy::prelude::*;
+use bevy::{light::NotShadowCaster, prelude::*};
 
 use crate::{
     building::{WorldGeometry, resource_obstacle_polygon},
     camera,
     colonist::{Colonist, ColonistState},
     terrain::{
-        GeneratedResource, GeneratedTerrain, TERRAIN_TILE_CELLS, TerrainGenerationConfig,
-        TerrainKind, TerrainSeed, generate_terrain, terrain_height,
+        GeneratedResource, GeneratedTerrain, TerrainGenerationConfig, TerrainKind, TerrainSeed,
+        generate_terrain, terrain_height, terrain_kind_at,
     },
     types::{BuildingKind, CELL_SIZE, ResourceKind, building_color},
 };
@@ -67,18 +67,8 @@ pub fn setup_scene(
     let tree_material = materials.add(Color::srgb(0.16, 0.38, 0.16));
     let food_material = materials.add(Color::srgb(0.66, 0.12, 0.18));
     let colonist_material = materials.add(Color::srgb(0.92, 0.72, 0.45));
-    let grass_material = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.5, 0.57, 0.45),
-        perceptual_roughness: 0.9,
-        ..default()
-    });
-    let forest_floor_material = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.23, 0.35, 0.22),
-        perceptual_roughness: 0.95,
-        ..default()
-    });
-    let forage_field_material = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.38, 0.5, 0.27),
+    let terrain_material = materials.add(StandardMaterial {
+        base_color: Color::WHITE,
         perceptual_roughness: 0.9,
         ..default()
     });
@@ -127,9 +117,8 @@ pub fn setup_scene(
     spawn_terrain_tiles(
         &mut commands,
         &mut meshes,
-        &grass_material,
-        &forest_floor_material,
-        &forage_field_material,
+        &terrain_material,
+        terrain_config.tile_cells,
         &terrain,
         terrain_seed.0,
     );
@@ -148,29 +137,23 @@ pub fn setup_scene(
 fn spawn_terrain_tiles(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
-    grass_material: &Handle<StandardMaterial>,
-    forest_floor_material: &Handle<StandardMaterial>,
-    forage_field_material: &Handle<StandardMaterial>,
+    terrain_material: &Handle<StandardMaterial>,
+    tile_cells: i32,
     terrain: &GeneratedTerrain,
     seed: u64,
 ) {
-    let tile_size = TERRAIN_TILE_CELLS as f32 * CELL_SIZE;
-    let subdivisions = 4;
+    let tile_cells = tile_cells.max(1);
+    let tile_size = tile_cells as f32 * CELL_SIZE;
 
     for tile in &terrain.tiles {
-        let material = match tile.kind {
-            TerrainKind::Grass => grass_material.clone(),
-            TerrainKind::ForestFloor => forest_floor_material.clone(),
-            TerrainKind::ForageField => forage_field_material.clone(),
-        };
-
-        let mesh = heightfield_tile_mesh(seed, tile.center.x, tile.center.z, tile_size, subdivisions);
+        let mesh = heightfield_tile_mesh(seed, tile.center.x, tile.center.z, tile_size, tile_cells);
         let mesh_handle = meshes.add(mesh);
 
         commands.spawn((
             Mesh3d(mesh_handle),
-            MeshMaterial3d(material),
+            MeshMaterial3d(terrain_material.clone()),
             Transform::from_translation(Vec3::new(tile.center.x, 0.0, tile.center.z)),
+            NotShadowCaster,
         ));
     }
 }
@@ -180,17 +163,18 @@ fn heightfield_tile_mesh(
     center_x: f32,
     center_z: f32,
     tile_size: f32,
-    subdivisions: u32,
+    tile_cells: i32,
 ) -> Mesh {
     let half = tile_size * 0.5;
     let min_x = center_x - half;
     let min_z = center_z - half;
-    let verts_per_side = subdivisions + 2;
+    let verts_per_side = tile_cells.max(1) as u32 + 1;
     let cell_size = tile_size / (verts_per_side - 1) as f32;
 
     let mut positions = Vec::with_capacity((verts_per_side * verts_per_side) as usize);
     let mut normals = Vec::with_capacity((verts_per_side * verts_per_side) as usize);
     let mut uvs = Vec::with_capacity((verts_per_side * verts_per_side) as usize);
+    let mut colors = Vec::with_capacity((verts_per_side * verts_per_side) as usize);
     let mut indices = Vec::new();
 
     for iz in 0..verts_per_side {
@@ -203,8 +187,9 @@ fn heightfield_tile_mesh(
             let v = iz as f32 / (verts_per_side - 1) as f32;
 
             positions.push([x - center_x, y, z - center_z]);
-            normals.push([0.0, 1.0, 0.0]);
+            normals.push(terrain_normal(seed, x, z));
             uvs.push([u, v]);
+            colors.push(terrain_vertex_color(seed, x, z, y));
         }
     }
 
@@ -225,9 +210,6 @@ fn heightfield_tile_mesh(
         }
     }
 
-    // Compute normals
-    compute_flat_normals(&mut normals, &positions, &indices);
-
     Mesh::new(
         bevy::mesh::PrimitiveTopology::TriangleList,
         bevy::asset::RenderAssetUsages::default(),
@@ -235,40 +217,29 @@ fn heightfield_tile_mesh(
     .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
     .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
     .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, colors)
     .with_inserted_indices(bevy::mesh::Indices::U32(indices))
 }
 
-fn compute_flat_normals(normals: &mut [[f32; 3]], positions: &[[f32; 3]], indices: &[u32]) {
-    for normal in normals.iter_mut() {
-        *normal = [0.0, 0.0, 0.0];
-    }
+fn terrain_normal(seed: u64, x: f32, z: f32) -> [f32; 3] {
+    let sample_dist = 0.5;
+    let left = terrain_height(seed, x - sample_dist, z);
+    let right = terrain_height(seed, x + sample_dist, z);
+    let down = terrain_height(seed, x, z - sample_dist);
+    let up = terrain_height(seed, x, z + sample_dist);
+    Vec3::new(left - right, sample_dist * 2.0, down - up)
+        .normalize_or_zero()
+        .to_array()
+}
 
-    for tri in indices.chunks(3) {
-        if tri.len() < 3 {
-            continue;
-        }
-        let a = Vec3::from_array(positions[tri[0] as usize]);
-        let b = Vec3::from_array(positions[tri[1] as usize]);
-        let c = Vec3::from_array(positions[tri[2] as usize]);
-        let face_normal = (b - a).cross(c - a).normalize_or_zero();
-        for &idx in &[tri[0], tri[1], tri[2]] {
-            let n = &mut normals[idx as usize];
-            n[0] += face_normal.x;
-            n[1] += face_normal.y;
-            n[2] += face_normal.z;
-        }
-    }
-
-    for normal in normals.iter_mut() {
-        let len = (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]).sqrt();
-        if len > 0.0001 {
-            normal[0] /= len;
-            normal[1] /= len;
-            normal[2] /= len;
-        } else {
-            normal[1] = 1.0;
-        }
-    }
+fn terrain_vertex_color(seed: u64, x: f32, z: f32, height: f32) -> [f32; 4] {
+    let base = match terrain_kind_at(seed, x, z) {
+        TerrainKind::Grass => [0.5, 0.57, 0.45],
+        TerrainKind::ForestFloor => [0.23, 0.35, 0.22],
+        TerrainKind::ForageField => [0.38, 0.5, 0.27],
+    };
+    let shade = (0.96 + height * 0.012).clamp(0.78, 1.12);
+    [base[0] * shade, base[1] * shade, base[2] * shade, 1.0]
 }
 
 fn spawn_resource_nodes(

@@ -1,7 +1,7 @@
 use bevy::{prelude::*, window::PrimaryWindow};
 
 use crate::{
-    math::ray_terrain_intersection,
+    math::{ray_terrain_intersection, terrain_pick_max_distance},
     terrain::{TerrainGenerationConfig, terrain_height},
     types::{
         BuildingKind, CELL_SIZE, entrance_local_offset, entrance_world_position, snap_to_grid,
@@ -292,7 +292,7 @@ fn cursor_ground_position(
         .viewport_to_world(camera_transform, cursor_position)
         .ok()?;
 
-    ray_terrain_intersection(ray, seed, 200.0)
+    ray_terrain_intersection(ray, seed, terrain_pick_max_distance())
 }
 
 fn preview_scale(kind: BuildingKind, size: IVec2, height: f32) -> Vec3 {

@@ -1,12 +1,14 @@
+use std::{cmp::Ordering, collections::BinaryHeap};
+
 use bevy::prelude::*;
 
 use crate::math::{xz_distance, xz_length};
 use crate::types::{CELL_SIZE, MAP_HALF_CELLS, ResourceKind};
 
 pub const DEFAULT_TERRAIN_SEED: u64 = 0x5452_4149_4C42_4C5A;
-pub const TERRAIN_TILE_CELLS: i32 = 4;
-pub const WOOD_NODE_COUNT: usize = 32;
-pub const FOOD_NODE_COUNT: usize = 18;
+pub const TERRAIN_CHUNK_CELLS: i32 = 24;
+pub const WOOD_NODE_COUNT: usize = 96;
+pub const FOOD_NODE_COUNT: usize = 54;
 pub const WOOD_NODE_AMOUNT: i32 = 24;
 pub const FOOD_NODE_AMOUNT: i32 = 20;
 
@@ -19,10 +21,15 @@ const FOREST_SALT: u64 = 0x464F_5245_5354;
 const FORAGE_SALT: u64 = 0x464F_5241_4745;
 const JITTER_SALT: u64 = 0x4A49_5454_4552;
 
-const HEIGHT_SALT: u64 = 0x4845_4947_4854;
-const DEFAULT_HEIGHT_AMPLITUDE: f32 = 2.0;
-const DEFAULT_HEIGHT_FREQUENCY: f32 = 0.025;
+const MACRO_HEIGHT_SALT: u64 = 0x4D41_4352_4F48_4754;
+const DETAIL_HEIGHT_SALT: u64 = 0x4445_5441_494C_4854;
+const MACRO_HEIGHT_AMPLITUDE: f32 = 45.0;
+const MACRO_HEIGHT_FREQUENCY: f32 = 0.0045;
+const DETAIL_HEIGHT_AMPLITUDE: f32 = 1.25;
+const DETAIL_HEIGHT_FREQUENCY: f32 = 0.028;
 const DEFAULT_MAX_BUILDABLE_SLOPE: f32 = 0.58;
+const RESOURCE_CANDIDATE_POOL_MULTIPLIER: usize = 20;
+const MIN_RESOURCE_CANDIDATE_POOL: usize = 512;
 
 pub struct TerrainPlugin;
 
@@ -77,9 +84,13 @@ pub struct TerrainGenerationConfig {
     pub edge_margin_cells: i32,
     pub min_resource_spacing: f32,
     #[allow(dead_code)]
-    pub height_amplitude: f32,
+    pub macro_height_amplitude: f32,
     #[allow(dead_code)]
-    pub height_frequency: f32,
+    pub macro_height_frequency: f32,
+    #[allow(dead_code)]
+    pub detail_height_amplitude: f32,
+    #[allow(dead_code)]
+    pub detail_height_frequency: f32,
     pub max_buildable_slope: f32,
 }
 
@@ -88,22 +99,35 @@ impl Default for TerrainGenerationConfig {
         Self {
             seed: DEFAULT_TERRAIN_SEED,
             half_cells: MAP_HALF_CELLS,
-            tile_cells: TERRAIN_TILE_CELLS,
+            tile_cells: TERRAIN_CHUNK_CELLS,
             wood_nodes: WOOD_NODE_COUNT,
             food_nodes: FOOD_NODE_COUNT,
             start_clear_radius: START_CLEAR_RADIUS,
             edge_margin_cells: EDGE_MARGIN_CELLS,
             min_resource_spacing: MIN_RESOURCE_SPACING,
-            height_amplitude: DEFAULT_HEIGHT_AMPLITUDE,
-            height_frequency: DEFAULT_HEIGHT_FREQUENCY,
+            macro_height_amplitude: MACRO_HEIGHT_AMPLITUDE,
+            macro_height_frequency: MACRO_HEIGHT_FREQUENCY,
+            detail_height_amplitude: DETAIL_HEIGHT_AMPLITUDE,
+            detail_height_frequency: DETAIL_HEIGHT_FREQUENCY,
             max_buildable_slope: DEFAULT_MAX_BUILDABLE_SLOPE,
         }
     }
 }
 
 pub fn terrain_height(seed: u64, x: f32, z: f32) -> f32 {
-    (fractal_noise(seed, x, z, DEFAULT_HEIGHT_FREQUENCY, HEIGHT_SALT) * 2.0 - 1.0)
-        * DEFAULT_HEIGHT_AMPLITUDE
+    macro_terrain_height(seed, x, z) + detail_terrain_height(seed, x, z)
+}
+
+fn macro_terrain_height(seed: u64, x: f32, z: f32) -> f32 {
+    let centered =
+        fractal_noise_octaves(seed, x, z, MACRO_HEIGHT_FREQUENCY, MACRO_HEIGHT_SALT, 3) * 2.0 - 1.0;
+    let shaped = centered + centered.powi(3) * 0.4;
+    shaped * MACRO_HEIGHT_AMPLITUDE
+}
+
+fn detail_terrain_height(seed: u64, x: f32, z: f32) -> f32 {
+    (fractal_noise_octaves(seed, x, z, DETAIL_HEIGHT_FREQUENCY, DETAIL_HEIGHT_SALT, 3) * 2.0 - 1.0)
+        * DETAIL_HEIGHT_AMPLITUDE
 }
 
 pub fn terrain_slope(seed: u64, x: f32, z: f32, sample_dist: f32) -> f32 {
@@ -185,13 +209,7 @@ fn select_resources(
     resources: &mut Vec<GeneratedResource>,
 ) {
     let mut candidates = resource_candidates(config, kind);
-    candidates.sort_by(|left, right| {
-        right
-            .score
-            .total_cmp(&left.score)
-            .then_with(|| left.position.x.total_cmp(&right.position.x))
-            .then_with(|| left.position.z.total_cmp(&right.position.z))
-    });
+    candidates.sort_by(|left, right| candidate_quality_cmp(right, left));
 
     for candidate in candidates {
         if resources.iter().any(|resource| {
@@ -223,12 +241,36 @@ struct ResourceCandidate {
     score: f32,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct CandidatePoolItem(ResourceCandidate);
+
+impl PartialEq for CandidatePoolItem {
+    fn eq(&self, other: &Self) -> bool {
+        candidate_quality_cmp(&self.0, &other.0) == Ordering::Equal
+    }
+}
+
+impl Eq for CandidatePoolItem {}
+
+impl PartialOrd for CandidatePoolItem {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for CandidatePoolItem {
+    fn cmp(&self, other: &Self) -> Ordering {
+        candidate_quality_cmp(&self.0, &other.0).reverse()
+    }
+}
+
 fn resource_candidates(
     config: &TerrainGenerationConfig,
     kind: ResourceKind,
 ) -> Vec<ResourceCandidate> {
     let limit = (config.half_cells - config.edge_margin_cells).max(0);
-    let mut candidates = Vec::new();
+    let pool_limit = resource_candidate_pool_size(target_count_for_kind(config, kind));
+    let mut candidates = BinaryHeap::with_capacity(pool_limit.saturating_add(1));
 
     for x in -limit..=limit {
         for z in -limit..=limit {
@@ -248,11 +290,54 @@ fn resource_candidates(
                     forage * 0.76 + (1.0 - forest) * 0.14 + jitter * 0.1
                 }
             };
-            candidates.push(ResourceCandidate { position, score });
+            push_candidate(
+                &mut candidates,
+                ResourceCandidate { position, score },
+                pool_limit,
+            );
         }
     }
 
     candidates
+        .into_iter()
+        .map(|candidate| candidate.0)
+        .collect()
+}
+
+fn push_candidate(
+    candidates: &mut BinaryHeap<CandidatePoolItem>,
+    candidate: ResourceCandidate,
+    pool_limit: usize,
+) {
+    if candidates.len() < pool_limit {
+        candidates.push(CandidatePoolItem(candidate));
+        return;
+    }
+
+    if let Some(worst) = candidates.peek() {
+        if candidate_quality_cmp(&candidate, &worst.0).is_gt() {
+            candidates.pop();
+            candidates.push(CandidatePoolItem(candidate));
+        }
+    }
+}
+
+fn resource_candidate_pool_size(target_count: usize) -> usize {
+    (target_count * RESOURCE_CANDIDATE_POOL_MULTIPLIER).max(MIN_RESOURCE_CANDIDATE_POOL)
+}
+
+fn target_count_for_kind(config: &TerrainGenerationConfig, kind: ResourceKind) -> usize {
+    match kind {
+        ResourceKind::Wood => config.wood_nodes,
+        ResourceKind::Food => config.food_nodes,
+    }
+}
+
+fn candidate_quality_cmp(left: &ResourceCandidate, right: &ResourceCandidate) -> Ordering {
+    left.score
+        .total_cmp(&right.score)
+        .then_with(|| right.position.x.total_cmp(&left.position.x))
+        .then_with(|| right.position.z.total_cmp(&left.position.z))
 }
 
 fn resource_amount(kind: ResourceKind) -> i32 {
@@ -272,6 +357,11 @@ fn classify_terrain(forest: f32, forage: f32) -> TerrainKind {
     }
 }
 
+pub fn terrain_kind_at(seed: u64, x: f32, z: f32) -> TerrainKind {
+    let (forest, forage) = terrain_scores(seed, x, z);
+    classify_terrain(forest, forage)
+}
+
 fn terrain_scores(seed: u64, x: f32, z: f32) -> (f32, f32) {
     (
         fractal_noise(seed, x, z, 0.045, FOREST_SALT),
@@ -280,12 +370,23 @@ fn terrain_scores(seed: u64, x: f32, z: f32) -> (f32, f32) {
 }
 
 fn fractal_noise(seed: u64, x: f32, z: f32, base_frequency: f32, salt: u64) -> f32 {
+    fractal_noise_octaves(seed, x, z, base_frequency, salt, 4)
+}
+
+fn fractal_noise_octaves(
+    seed: u64,
+    x: f32,
+    z: f32,
+    base_frequency: f32,
+    salt: u64,
+    octaves: usize,
+) -> f32 {
     let mut total = 0.0;
     let mut normalizer = 0.0;
     let mut amplitude = 1.0;
     let mut frequency = base_frequency;
 
-    for octave in 0..4 {
+    for octave in 0..octaves {
         total += value_noise(
             seed,
             x,
@@ -351,7 +452,7 @@ fn lerp(left: f32, right: f32, amount: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::MAP_BUILD_HALF_EXTENT;
+    use crate::types::{MAP_BUILD_HALF_EXTENT, MAP_GRID_CELLS, MAP_HALF_CELLS};
 
     #[test]
     fn generated_terrain_is_deterministic_for_same_seed() {
@@ -361,10 +462,20 @@ mod tests {
     }
 
     #[test]
-    fn generated_tiles_cover_expected_overlay_grid() {
+    fn generated_tiles_cover_expected_chunk_grid() {
         let terrain = generate_terrain(TerrainGenerationConfig::default());
 
-        assert_eq!(terrain.tiles.len(), 24 * 24);
+        assert_eq!(terrain.tiles.len(), 18 * 18);
+    }
+
+    #[test]
+    fn default_map_area_is_about_twenty_times_original() {
+        let old_grid_cells = 96.0;
+        let area_ratio =
+            (MAP_GRID_CELLS as f32 * MAP_GRID_CELLS as f32) / (old_grid_cells * old_grid_cells);
+
+        assert_eq!(MAP_GRID_CELLS, 432);
+        assert!((area_ratio - 20.25).abs() < 0.01);
     }
 
     #[test]
@@ -441,7 +552,23 @@ mod tests {
         let seed = 0x5452_4149_4C42_4C5A;
         let h1 = terrain_height(seed, 0.0, 0.0);
         let h2 = terrain_height(seed, 60.0, 60.0);
-        assert!((h1 - h2).abs() > 0.01, "height should vary more: {h1} vs {h2}");
+        assert!(
+            (h1 - h2).abs() > 0.01,
+            "height should vary more: {h1} vs {h2}"
+        );
+    }
+
+    #[test]
+    fn macro_height_layer_has_larger_range_than_detail_layer() {
+        let seed = 0x5452_4149_4C42_4C5A;
+        let macro_range = sampled_height_range(|x, z| macro_terrain_height(seed, x, z));
+        let detail_range = sampled_height_range(|x, z| detail_terrain_height(seed, x, z));
+
+        assert!(macro_range > 5.0, "macro range was {macro_range}");
+        assert!(
+            macro_range > detail_range * 2.0,
+            "macro range {macro_range} should dominate detail range {detail_range}"
+        );
     }
 
     #[test]
@@ -460,5 +587,22 @@ mod tests {
             assert!(tile.slope.is_finite());
             assert!(tile.slope >= 0.0);
         }
+    }
+
+    fn sampled_height_range(mut height_at: impl FnMut(f32, f32) -> f32) -> f32 {
+        let mut min_height = f32::MAX;
+        let mut max_height = f32::MIN;
+        let mut x = -MAP_HALF_CELLS;
+        while x <= MAP_HALF_CELLS {
+            let mut z = -MAP_HALF_CELLS;
+            while z <= MAP_HALF_CELLS {
+                let height = height_at(x as f32, z as f32);
+                min_height = min_height.min(height);
+                max_height = max_height.max(height);
+                z += TERRAIN_CHUNK_CELLS;
+            }
+            x += TERRAIN_CHUNK_CELLS;
+        }
+        max_height - min_height
     }
 }
