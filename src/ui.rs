@@ -52,6 +52,9 @@ pub enum TimeButton {
 #[derive(Component)]
 pub struct SnapButton;
 
+#[derive(Component)]
+pub struct FpsText;
+
 pub fn spawn_ui(mut commands: Commands) {
     commands.spawn((
         Node {
@@ -76,6 +79,11 @@ pub fn spawn_ui(mut commands: Commands) {
             (
                 StatusText,
                 Text::new("Select a building."),
+                TextColor(Color::srgb(0.86, 0.9, 0.92)),
+            ),
+            (
+                FpsText,
+                Text::new("FPS: --"),
                 TextColor(Color::srgb(0.86, 0.9, 0.92)),
             )
         ],
@@ -232,6 +240,7 @@ pub fn handle_ui_buttons(
 pub fn update_ui_text(
     stock: Res<ResourceStock>,
     clock: Res<SimulationClock>,
+    diagnostics: Res<bevy::diagnostic::DiagnosticsStore>,
     terrain_config: Res<TerrainGenerationConfig>,
     build_state: Res<BuildState>,
     geometry: Res<WorldGeometry>,
@@ -246,6 +255,7 @@ pub fn update_ui_text(
         Query<&mut Text, With<SelectionTitle>>,
         Query<&mut Text, With<SelectionBody>>,
         Query<&mut Text, With<TerrainDebugText>>,
+        Query<&mut Text, With<FpsText>>,
     )>,
 ) {
     let population = colonists.iter().count() as i32;
@@ -306,6 +316,14 @@ pub fn update_ui_text(
             "Map: {}x{}  Seed: 0x{:016X}  Nodes: Wood {} / Food {}",
             MAP_GRID_CELLS, MAP_GRID_CELLS, terrain_config.seed, wood_nodes, food_nodes
         );
+    }
+    if let Ok(mut text) = text_queries.p5().single_mut() {
+        let fps = diagnostics
+            .get(&bevy::diagnostic::FrameTimeDiagnosticsPlugin::FPS)
+            .and_then(|d| d.smoothed())
+            .map(|f| f as i32)
+            .unwrap_or(0);
+        text.0 = format!("FPS: {}", fps);
     }
 }
 
