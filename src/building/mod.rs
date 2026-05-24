@@ -7,14 +7,14 @@ mod polygon;
 mod state;
 
 pub use components::*;
-pub use geometry::WorldGeometry;
+pub use geometry::{NavigationDirtyArea, WorldGeometry};
 pub use polygon::{
-    expanded_polygon, footprint_polygon, resource_obstacle_polygon,
+    expanded_polygon, footprint_polygon, point_in_polygon, resource_obstacle_polygon,
 };
 pub use state::{BuildState, PlacementIssue};
 
 #[cfg(test)]
-pub use polygon::{point_in_polygon, rectangle_polygon};
+pub use polygon::rectangle_polygon;
 
 use bevy::prelude::*;
 

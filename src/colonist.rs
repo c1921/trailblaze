@@ -3,10 +3,10 @@ use bevy::prelude::*;
 use crate::{
     building::{Blueprint, BuildingEntrance, CompletedBuilding, Housing, WorldGeometry},
     math::xz_distance,
-    navigation::{PathCache, line_of_sight_clear, path_to_waypoints},
-    resources::{
-        COLONIST_CARRY_CAPACITY, HOME_FOOD_PER_RESIDENT, Inventory, PublicInventory, carried_amount,
+    navigation::{
+        NavGrid, PathPlanner, PathRequestId, poll_path_planner, submit_path_planner, sync_nav_grid,
     },
+    resources::{HOME_FOOD_PER_RESIDENT, Inventory, PublicInventory, carried_amount},
     simulation::SimulationClock,
     terrain::{TerrainSeed, terrain_height},
     types::{BuildingKind, ResourceKind},
@@ -20,23 +20,28 @@ const SATIETY_LOSS_SECONDS: f32 = 10.0;
 const HUNGER_THRESHOLD: f32 = 50.0;
 const EAT_RESTORE: f32 = 50.0;
 const EAT_REST_SECONDS: f32 = 2.0;
-const PATH_REBUILD_INTERVAL: f32 = 0.25;
+const PATH_FAILURE_RETRY_SECONDS: f32 = 0.2;
 const GATHER_PATH_CANDIDATE_LIMIT: usize = 12;
 
 pub struct ColonistPlugin;
 
 impl Plugin for ColonistPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<PathCache>().add_systems(
-            Update,
-            (
-                tick_colonist_needs,
-                assign_housing,
-                assign_idle_colonists,
-                update_colonists,
-            )
-                .chain(),
-        );
+        app.init_resource::<NavGrid>()
+            .init_resource::<PathPlanner>()
+            .add_systems(
+                Update,
+                (
+                    sync_nav_grid,
+                    poll_path_planner,
+                    tick_colonist_needs,
+                    assign_housing,
+                    assign_idle_colonists,
+                    update_colonists,
+                    submit_path_planner,
+                )
+                    .chain(),
+            );
     }
 }
 
@@ -45,7 +50,6 @@ pub struct Colonist {
     pub name: String,
     pub state: ColonistState,
     pub speed: f32,
-    pub path_rebuild_timer: f32,
     pub home: Option<Entity>,
     pub satiety: f32,
     pub carry_capacity: i32,
@@ -68,6 +72,12 @@ pub enum ColonistState {
         target: Vec3,
         path: Vec<Vec3>,
         task: Task,
+        nav_revision: u64,
+    },
+    PlanningPath {
+        request_id: PathRequestId,
+        target: Vec3,
+        task: Task,
     },
     Gathering {
         resource: Entity,
@@ -79,6 +89,9 @@ pub enum ColonistState {
         blueprint: Entity,
     },
     Eating {
+        timer: f32,
+    },
+    WaitingForPathRetry {
         timer: f32,
     },
 }
@@ -129,9 +142,11 @@ impl ColonistState {
         match self {
             Self::Idle => "Idle".to_string(),
             Self::Moving { task, .. } => format!("Moving: {}", task.label()),
+            Self::PlanningPath { task, .. } => format!("Planning: {}", task.label()),
             Self::Gathering { kind, .. } => format!("Gathering {}", kind.label()),
             Self::Building { .. } => "Building a blueprint".to_string(),
             Self::Eating { .. } => "Eating".to_string(),
+            Self::WaitingForPathRetry { .. } => "Waiting for a path".to_string(),
         }
     }
 }
@@ -225,9 +240,9 @@ pub fn assign_housing(
 }
 
 pub fn assign_idle_colonists(
-    geometry: Res<WorldGeometry>,
+    nav_grid: Res<NavGrid>,
     terrain_seed: Res<TerrainSeed>,
-    mut cache: ResMut<PathCache>,
+    mut planner: ResMut<PathPlanner>,
     mut colonists: Query<(&mut Colonist, &Transform)>,
     blueprints: Query<(Entity, &Blueprint, &Transform, Option<&BuildingEntrance>)>,
     resources: Query<(Entity, &ResourceNode, &Transform)>,
@@ -266,9 +281,14 @@ pub fn assign_idle_colonists(
         let start = transform.translation;
 
         if colonist.is_hungry() {
-            if let Some(state) =
-                eat_candidate(&geometry, &mut *cache, start, &colonist, &inventories, seed)
-            {
+            if let Some(state) = eat_candidate(
+                &nav_grid,
+                &mut planner,
+                start,
+                &colonist,
+                &inventories,
+                seed,
+            ) {
                 colonist.state = state;
                 continue;
             }
@@ -276,8 +296,8 @@ pub fn assign_idle_colonists(
 
         let mut assigned = false;
         if let Some((blueprint, amount, state)) = material_delivery_candidate(
-            &geometry,
-            &mut *cache,
+            &nav_grid,
+            &mut planner,
             start,
             &colonist,
             &blueprints,
@@ -293,22 +313,27 @@ pub fn assign_idle_colonists(
             continue;
         }
 
-        if let Some(state) = build_candidate(&geometry, &mut *cache, start, &blueprints, seed) {
+        if let Some(state) = build_candidate(&nav_grid, &mut planner, start, &blueprints, seed) {
             colonist.state = state;
             continue;
         }
 
-        if let Some(state) =
-            home_restock_candidate(&geometry, &mut *cache, start, &colonist, &inventories, seed)
-        {
+        if let Some(state) = home_restock_candidate(
+            &nav_grid,
+            &mut planner,
+            start,
+            &colonist,
+            &inventories,
+            seed,
+        ) {
             colonist.state = state;
             continue;
         }
 
         if has_woodcutter {
             if let Some((_, resource, amount, state)) = gather_candidate(
-                &geometry,
-                &mut *cache,
+                &nav_grid,
+                &mut planner,
                 start,
                 ResourceKind::Wood,
                 &resources,
@@ -325,8 +350,8 @@ pub fn assign_idle_colonists(
 
         if has_gatherer {
             if let Some((_, resource, amount, state)) = gather_candidate(
-                &geometry,
-                &mut *cache,
+                &nav_grid,
+                &mut planner,
                 start,
                 ResourceKind::Food,
                 &resources,
@@ -361,6 +386,7 @@ impl AssignmentReservations {
     fn reserve_state(&mut self, state: &ColonistState) {
         match state {
             ColonistState::Moving { task, .. } => self.reserve_task(task),
+            ColonistState::PlanningPath { task, .. } => self.reserve_task(task),
             ColonistState::Gathering {
                 resource,
                 kind,
@@ -369,8 +395,10 @@ impl AssignmentReservations {
             } => {
                 self.reserve_gather(*resource, *kind, *amount);
             }
-            ColonistState::Idle | ColonistState::Building { .. } | ColonistState::Eating { .. } => {
-            }
+            ColonistState::Idle
+            | ColonistState::Building { .. }
+            | ColonistState::Eating { .. }
+            | ColonistState::WaitingForPathRetry { .. } => {}
         }
     }
 
@@ -441,8 +469,8 @@ impl AssignmentReservations {
 }
 
 fn eat_candidate(
-    geometry: &WorldGeometry,
-    cache: &mut PathCache,
+    nav_grid: &NavGrid,
+    planner: &mut PathPlanner,
     start: Vec3,
     colonist: &Colonist,
     inventories: &Query<
@@ -464,8 +492,8 @@ fn eat_candidate(
             if inventory.amount(ResourceKind::Food) > 0 {
                 let target = building_interaction_position(transform, entrance);
                 if let Some((state, _)) = moving_state_to_target(
-                    geometry,
-                    cache,
+                    nav_grid,
+                    planner,
                     start,
                     target,
                     Task::Eat { inventory: home },
@@ -491,8 +519,8 @@ fn eat_candidate(
 
     for (_, inventory, target) in candidates {
         if let Some((state, _)) = moving_state_to_target(
-            geometry,
-            cache,
+            nav_grid,
+            planner,
             start,
             target,
             Task::Eat { inventory },
@@ -506,8 +534,8 @@ fn eat_candidate(
 }
 
 fn material_delivery_candidate(
-    geometry: &WorldGeometry,
-    cache: &mut PathCache,
+    nav_grid: &NavGrid,
+    planner: &mut PathPlanner,
     start: Vec3,
     colonist: &Colonist,
     blueprints: &Query<(Entity, &Blueprint, &Transform, Option<&BuildingEntrance>)>,
@@ -569,7 +597,8 @@ fn material_delivery_candidate(
     });
 
     for (_, _, blueprint, amount, target, task) in candidates {
-        if let Some((state, _)) = moving_state_to_target(geometry, cache, start, target, task, seed)
+        if let Some((state, _)) =
+            moving_state_to_target(nav_grid, planner, start, target, task, seed)
         {
             return Some((blueprint, amount, state));
         }
@@ -579,8 +608,8 @@ fn material_delivery_candidate(
 }
 
 fn build_candidate(
-    geometry: &WorldGeometry,
-    cache: &mut PathCache,
+    nav_grid: &NavGrid,
+    planner: &mut PathPlanner,
     start: Vec3,
     blueprints: &Query<(Entity, &Blueprint, &Transform, Option<&BuildingEntrance>)>,
     seed: u64,
@@ -603,7 +632,8 @@ fn build_candidate(
     candidates.sort_by(|(dist_a, ..), (dist_b, ..)| dist_a.total_cmp(dist_b));
 
     for (_, target, task) in candidates {
-        if let Some((state, _)) = moving_state_to_target(geometry, cache, start, target, task, seed)
+        if let Some((state, _)) =
+            moving_state_to_target(nav_grid, planner, start, target, task, seed)
         {
             return Some(state);
         }
@@ -613,8 +643,8 @@ fn build_candidate(
 }
 
 fn home_restock_candidate(
-    geometry: &WorldGeometry,
-    cache: &mut PathCache,
+    nav_grid: &NavGrid,
+    planner: &mut PathPlanner,
     start: Vec3,
     colonist: &Colonist,
     inventories: &Query<
@@ -671,7 +701,8 @@ fn home_restock_candidate(
             home,
             amount,
         };
-        if let Some((state, _)) = moving_state_to_target(geometry, cache, start, target, task, seed)
+        if let Some((state, _)) =
+            moving_state_to_target(nav_grid, planner, start, target, task, seed)
         {
             return Some(state);
         }
@@ -681,8 +712,8 @@ fn home_restock_candidate(
 }
 
 fn gather_candidate(
-    geometry: &WorldGeometry,
-    cache: &mut PathCache,
+    nav_grid: &NavGrid,
+    planner: &mut PathPlanner,
     start: Vec3,
     kind: ResourceKind,
     resources: &Query<(Entity, &ResourceNode, &Transform)>,
@@ -720,8 +751,8 @@ fn gather_candidate(
 
     for candidate in candidates.into_iter().take(GATHER_PATH_CANDIDATE_LIMIT) {
         if let Some(result) = movement_to_resource(
-            geometry,
-            cache,
+            nav_grid,
+            planner,
             start,
             candidate.position,
             Task::Gather {
@@ -836,22 +867,31 @@ fn building_interaction_position(
 }
 
 fn moving_state_to_target(
-    geometry: &WorldGeometry,
-    cache: &mut PathCache,
+    nav_grid: &NavGrid,
+    planner: &mut PathPlanner,
     start: Vec3,
     target: Vec3,
     task: Task,
-    seed: u64,
+    _seed: u64,
 ) -> Option<(ColonistState, usize)> {
-    let path = path_to_waypoints(geometry, cache, start, target, seed)?;
-    let path_len = path.len();
+    if nav_grid.endpoint_chunks_clean(start, target) && !nav_grid.maybe_reachable(start, target) {
+        return None;
+    }
+    let request_id = planner.request_path(nav_grid, start, target);
 
-    Some((ColonistState::Moving { target, path, task }, path_len))
+    Some((
+        ColonistState::PlanningPath {
+            request_id,
+            target,
+            task,
+        },
+        0,
+    ))
 }
 
 fn movement_to_resource(
-    geometry: &WorldGeometry,
-    cache: &mut PathCache,
+    nav_grid: &NavGrid,
+    planner: &mut PathPlanner,
     start: Vec3,
     resource_position: Vec3,
     task: Task,
@@ -859,7 +899,6 @@ fn movement_to_resource(
 ) -> Option<(usize, ColonistState)> {
     let mut targets: Vec<(f32, Vec3)> = resource_interaction_targets(resource_position, seed)
         .into_iter()
-        .filter(|target| geometry.is_walkable_point(*target))
         .map(|target| (xz_distance(start, target), target))
         .collect();
 
@@ -867,7 +906,7 @@ fn movement_to_resource(
 
     for (_, target) in targets {
         if let Some((state, path_len)) =
-            moving_state_to_target(geometry, cache, start, target, task.clone(), seed)
+            moving_state_to_target(nav_grid, planner, start, target, task.clone(), seed)
         {
             return Some((path_len, state));
         }
@@ -925,8 +964,8 @@ fn resource_interaction_targets(resource_position: Vec3, seed: u64) -> [Vec3; 8]
 }
 
 fn deposit_moving_state(
-    geometry: &WorldGeometry,
-    cache: &mut PathCache,
+    nav_grid: &NavGrid,
+    planner: &mut PathPlanner,
     start: Vec3,
     inventories: &Query<
         (
@@ -970,7 +1009,8 @@ fn deposit_moving_state(
             kind,
             amount,
         };
-        if let Some((state, _)) = moving_state_to_target(geometry, cache, start, target, task, seed)
+        if let Some((state, _)) =
+            moving_state_to_target(nav_grid, planner, start, target, task, seed)
         {
             return Some(state);
         }
@@ -985,7 +1025,8 @@ pub fn update_colonists(
     clock: Res<SimulationClock>,
     terrain_seed: Res<TerrainSeed>,
     mut geometry: ResMut<WorldGeometry>,
-    mut cache: ResMut<PathCache>,
+    nav_grid: Res<NavGrid>,
+    mut planner: ResMut<PathPlanner>,
     mut colonists: Query<(&mut Colonist, &mut Transform)>,
     mut blueprints: Query<(Entity, &mut Blueprint)>,
     mut resources: Query<&mut ResourceNode>,
@@ -1028,54 +1069,46 @@ pub fn update_colonists(
                     colonist.state = ColonistState::Idle;
                 }
             }
+            ColonistState::WaitingForPathRetry { mut timer } => {
+                timer -= dt;
+                if timer > 0.0 {
+                    colonist.state = ColonistState::WaitingForPathRetry { timer };
+                } else {
+                    colonist.state = ColonistState::Idle;
+                }
+            }
             ColonistState::Moving {
                 target,
                 mut path,
                 task,
+                nav_revision,
             } => {
                 if !moving_task_is_valid(&task, &mut resources) {
                     colonist.state = ColonistState::Idle;
                     continue;
                 }
 
-                let path_blocked = if !path.is_empty() {
-                    !line_of_sight_clear(&geometry, transform.translation, path[0])
-                } else {
-                    false
-                };
-
-                let validate_path =
-                    advance_path_rebuild_timer(&mut colonist.path_rebuild_timer, dt, path_blocked);
-                let needs_rebuild = path_blocked
-                    || (validate_path
-                        && path_needs_rebuild(&path, transform.translation, target, &geometry));
-
-                if needs_rebuild {
-                    if let Some((state, _)) = moving_state_to_target(
-                        &geometry,
-                        &mut *cache,
+                if nav_revision != nav_grid.revision() {
+                    colonist.state = moving_state_to_target(
+                        &nav_grid,
+                        &mut planner,
                         transform.translation,
                         target,
                         task.clone(),
                         seed,
-                    ) {
-                        if let ColonistState::Moving {
-                            path: rebuilt_path, ..
-                        } = state
-                        {
-                            path = rebuilt_path;
-                        }
-                    } else {
-                        colonist.state =
-                            unreachable_moving_state(target, task, &mut inventory_access);
-                        continue;
-                    }
+                    )
+                    .map(|(state, _)| state)
+                    .unwrap_or_else(|| {
+                        unreachable_moving_state(target, task.clone(), &mut inventory_access)
+                    });
+                    continue;
                 }
 
                 if move_along_path(&mut transform, target, &mut path, colonist.speed, dt, seed) {
                     colonist.state = complete_movement_task(
                         &mut geometry,
-                        &mut cache,
+                        &nav_grid,
+                        &mut planner,
                         &mut inventory_access,
                         &mut blueprints,
                         &mut colonist,
@@ -1084,7 +1117,58 @@ pub fn update_colonists(
                         seed,
                     );
                 } else {
-                    colonist.state = ColonistState::Moving { target, path, task };
+                    colonist.state = ColonistState::Moving {
+                        target,
+                        path,
+                        task,
+                        nav_revision,
+                    };
+                }
+            }
+            ColonistState::PlanningPath {
+                request_id,
+                target,
+                task,
+            } => {
+                if !moving_task_is_valid(&task, &mut resources) {
+                    colonist.state = ColonistState::Idle;
+                    continue;
+                }
+
+                let Some(result) = planner.take_result(request_id) else {
+                    colonist.state = ColonistState::PlanningPath {
+                        request_id,
+                        target,
+                        task,
+                    };
+                    continue;
+                };
+
+                if result.revision != nav_grid.revision() {
+                    colonist.state = moving_state_to_target(
+                        &nav_grid,
+                        &mut planner,
+                        transform.translation,
+                        target,
+                        task.clone(),
+                        seed,
+                    )
+                    .map(|(state, _)| state)
+                    .unwrap_or_else(|| {
+                        unreachable_moving_state(target, task.clone(), &mut inventory_access)
+                    });
+                    continue;
+                }
+
+                if let Some(path) = result.path {
+                    colonist.state = ColonistState::Moving {
+                        target,
+                        path,
+                        task,
+                        nav_revision: result.revision,
+                    };
+                } else {
+                    colonist.state = unreachable_moving_state(target, task, &mut inventory_access);
                 }
             }
             ColonistState::Gathering {
@@ -1126,8 +1210,8 @@ pub fn update_colonists(
                 if amount > 0 {
                     let inventories = inventory_access.p0();
                     colonist.state = deposit_moving_state(
-                        &geometry,
-                        &mut *cache,
+                        &nav_grid,
+                        &mut planner,
                         transform.translation,
                         &inventories,
                         kind,
@@ -1164,8 +1248,9 @@ pub fn update_colonists(
 }
 
 fn complete_movement_task(
-    geometry: &mut WorldGeometry,
-    cache: &mut PathCache,
+    _geometry: &mut WorldGeometry,
+    nav_grid: &NavGrid,
+    planner: &mut PathPlanner,
     inventory_access: &mut ParamSet<(
         Query<
             (
@@ -1202,8 +1287,8 @@ fn complete_movement_task(
 
             if blueprints.contains(blueprint) {
                 moving_state_to_target(
-                    geometry,
-                    cache,
+                    nav_grid,
+                    planner,
                     position,
                     delivery_target,
                     Task::DeliverMaterial {
@@ -1216,7 +1301,7 @@ fn complete_movement_task(
                 .map(|(state, _)| state)
                 .unwrap_or_else(|| {
                     add_to_nearest_public(inventory_access, position, kind, amount);
-                    ColonistState::Idle
+                    path_retry_state()
                 })
             } else {
                 add_to_nearest_public(inventory_access, position, kind, amount);
@@ -1258,8 +1343,8 @@ fn complete_movement_task(
             if leftover > 0 {
                 let inventories = inventory_access.p0();
                 deposit_moving_state(
-                    geometry,
-                    cache,
+                    nav_grid,
+                    planner,
                     position,
                     &inventories,
                     kind,
@@ -1267,7 +1352,7 @@ fn complete_movement_task(
                     seed,
                     Some(inventory),
                 )
-                .unwrap_or(ColonistState::Idle)
+                .unwrap_or_else(path_retry_state)
             } else {
                 ColonistState::Idle
             }
@@ -1303,8 +1388,8 @@ fn complete_movement_task(
 
             if let Some(target) = target {
                 moving_state_to_target(
-                    geometry,
-                    cache,
+                    nav_grid,
+                    planner,
                     position,
                     target,
                     Task::DeliverHomeFood { home, amount },
@@ -1313,7 +1398,7 @@ fn complete_movement_task(
                 .map(|(state, _)| state)
                 .unwrap_or_else(|| {
                     add_to_nearest_public(inventory_access, position, ResourceKind::Food, amount);
-                    ColonistState::Idle
+                    path_retry_state()
                 })
             } else {
                 add_to_nearest_public(inventory_access, position, ResourceKind::Food, amount);
@@ -1459,39 +1544,6 @@ fn moving_task_is_valid(task: &Task, resources: &mut Query<&mut ResourceNode>) -
     }
 }
 
-fn advance_path_rebuild_timer(timer: &mut f32, dt: f32, path_blocked: bool) -> bool {
-    if path_blocked {
-        *timer = PATH_REBUILD_INTERVAL;
-        return true;
-    }
-
-    *timer -= dt;
-    if *timer > 0.0 {
-        return false;
-    }
-
-    *timer = PATH_REBUILD_INTERVAL;
-    true
-}
-
-fn path_needs_rebuild(
-    path: &[Vec3],
-    current: Vec3,
-    target: Vec3,
-    geometry: &WorldGeometry,
-) -> bool {
-    if path.is_empty() {
-        return xz_distance(current, target) > 0.05;
-    }
-
-    if !line_of_sight_clear(geometry, current, path[0]) {
-        return true;
-    }
-
-    path.windows(2)
-        .any(|w| !line_of_sight_clear(geometry, w[0], w[1]))
-}
-
 fn unreachable_moving_state(
     target: Vec3,
     task: Task,
@@ -1512,24 +1564,26 @@ fn unreachable_moving_state(
     )>,
 ) -> ColonistState {
     match task {
-        Task::Deposit { .. } => ColonistState::Moving {
-            target,
-            path: Vec::new(),
-            task,
-        },
+        Task::Deposit { .. } => path_retry_state(),
         Task::DeliverMaterial { kind, amount, .. } => {
             add_to_nearest_public(inventory_access, target, kind, amount);
-            ColonistState::Idle
+            path_retry_state()
         }
         Task::DeliverHomeFood { amount, .. } => {
             add_to_nearest_public(inventory_access, target, ResourceKind::Food, amount);
-            ColonistState::Idle
+            path_retry_state()
         }
         Task::PickupMaterial { .. }
         | Task::Build { .. }
         | Task::Gather { .. }
         | Task::Eat { .. }
-        | Task::PickupHomeFood { .. } => ColonistState::Idle,
+        | Task::PickupHomeFood { .. } => path_retry_state(),
+    }
+}
+
+fn path_retry_state() -> ColonistState {
+    ColonistState::WaitingForPathRetry {
+        timer: PATH_FAILURE_RETRY_SECONDS,
     }
 }
 
@@ -1603,6 +1657,7 @@ fn best_home_candidate(homes: &[(Entity, usize, Vec3)], start: Vec3) -> Option<u
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resources::COLONIST_CARRY_CAPACITY;
     use crate::terrain::DEFAULT_TERRAIN_SEED;
 
     const SEED: u64 = DEFAULT_TERRAIN_SEED;
@@ -1664,7 +1719,6 @@ mod tests {
             name: "Test".to_string(),
             state: ColonistState::Idle,
             speed: 1.0,
-            path_rebuild_timer: 0.0,
             home: None,
             satiety: 49.9,
             carry_capacity: COLONIST_CARRY_CAPACITY,
@@ -1775,14 +1829,49 @@ mod tests {
     }
 
     #[test]
-    fn path_rebuild_timer_resets_after_validation_tick() {
-        let mut timer = 0.0;
+    fn moving_state_requests_async_path_before_moving() {
+        let mut geometry = WorldGeometry::default();
+        let mut nav_grid = NavGrid::default();
+        nav_grid.sync_for_test(&mut geometry, SEED);
+        let mut planner = PathPlanner::default();
+        let task = Task::Build {
+            blueprint: test_entity(20),
+        };
 
-        assert!(advance_path_rebuild_timer(&mut timer, 0.016, false));
-        assert_eq!(timer, PATH_REBUILD_INTERVAL);
+        let (state, path_len) = moving_state_to_target(
+            &nav_grid,
+            &mut planner,
+            Vec3::ZERO,
+            Vec3::new(2.0, 0.0, 0.0),
+            task,
+            SEED,
+        )
+        .unwrap();
 
-        assert!(!advance_path_rebuild_timer(&mut timer, 0.016, false));
-        assert!(timer > 0.0);
-        assert!(timer < PATH_REBUILD_INTERVAL);
+        assert_eq!(path_len, 0);
+        assert!(matches!(
+            state,
+            ColonistState::PlanningPath { request_id: 1, .. }
+        ));
+        assert!(planner.take_result(1).is_none());
+    }
+
+    #[test]
+    fn planning_path_reserves_its_task() {
+        let resource = test_entity(1);
+        let state = ColonistState::PlanningPath {
+            request_id: 7,
+            target: Vec3::new(1.0, 0.0, 0.0),
+            task: Task::Gather {
+                resource,
+                kind: ResourceKind::Food,
+                amount: 10,
+            },
+        };
+        let mut reservations = AssignmentReservations::default();
+
+        reservations.reserve_state(&state);
+
+        assert_eq!(reservations.reserved_gather(resource), 10);
     }
 }

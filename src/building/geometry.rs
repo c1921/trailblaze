@@ -6,10 +6,7 @@ use crate::terrain::max_slope_in_polygon;
 use super::PlacementIssue;
 #[cfg(test)]
 use super::polygon::{cell_center_2d, cell_polygon};
-use super::polygon::{
-    distance_to_polygon, expanded_polygon, point_in_polygon, polygons_intersect,
-    segment_intersects_polygon,
-};
+use super::polygon::{distance_to_polygon, point_in_polygon, polygons_intersect};
 #[cfg(test)]
 use crate::types::within_map;
 
@@ -28,10 +25,17 @@ pub struct ReservedEntrance {
     pub position: Vec2,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NavigationDirtyArea {
+    pub min: Vec2,
+    pub max: Vec2,
+}
+
 #[derive(Resource, Debug, Default)]
 pub struct WorldGeometry {
     obstacles: Vec<Obstacle>,
     reserved_entrances: Vec<ReservedEntrance>,
+    navigation_dirty_areas: Vec<NavigationDirtyArea>,
     revision: u64,
 }
 
@@ -163,6 +167,9 @@ impl WorldGeometry {
     }
 
     pub fn occupy_polygon(&mut self, polygon: Vec<Vec2>, entity: Entity, passable: bool) {
+        if !passable {
+            self.mark_navigation_dirty(polygon_bounds(&polygon));
+        }
         self.obstacles.push(Obstacle {
             entity,
             polygon,
@@ -189,9 +196,18 @@ impl WorldGeometry {
     pub fn release_entity(&mut self, entity: Entity) {
         let obstacle_count = self.obstacles.len();
         let reserved_count = self.reserved_entrances.len();
+        let released_areas: Vec<_> = self
+            .obstacles
+            .iter()
+            .filter(|obstacle| obstacle.entity == entity && !obstacle.passable)
+            .map(|obstacle| polygon_bounds(&obstacle.polygon))
+            .collect();
         self.obstacles.retain(|obstacle| obstacle.entity != entity);
         self.reserved_entrances
             .retain(|reserved| reserved.entity != entity);
+        for area in released_areas {
+            self.mark_navigation_dirty(area);
+        }
         if self.obstacles.len() != obstacle_count || self.reserved_entrances.len() != reserved_count
         {
             self.bump_revision();
@@ -203,6 +219,7 @@ impl WorldGeometry {
         within_map(cell) && self.is_walkable_point_2d(cell_center_2d(cell))
     }
 
+    #[cfg(test)]
     pub fn is_walkable_point(&self, point: Vec3) -> bool {
         self.is_walkable_point_2d(xz(point))
     }
@@ -224,24 +241,8 @@ impl WorldGeometry {
         self.revision
     }
 
-    pub fn segment_clear(&self, from: Vec3, to: Vec3, padding: f32) -> bool {
-        self.segment_clear_2d(xz(from), xz(to), padding)
-    }
-
-    pub fn segment_clear_2d(&self, from: Vec2, to: Vec2, padding: f32) -> bool {
-        if !within_world_bounds(from) || !within_world_bounds(to) {
-            return false;
-        }
-
-        self.obstacles
-            .iter()
-            .filter(|obstacle| !obstacle.passable)
-            .all(|obstacle| {
-                let polygon = expanded_polygon(&obstacle.polygon, padding);
-                !segment_intersects_polygon(from, to, &polygon)
-                    && !point_in_polygon(from, &polygon)
-                    && !point_in_polygon(to, &polygon)
-            })
+    pub fn take_navigation_dirty_areas(&mut self) -> Vec<NavigationDirtyArea> {
+        std::mem::take(&mut self.navigation_dirty_areas)
     }
 
     pub fn summary(&self) -> (usize, usize, usize) {
@@ -259,6 +260,20 @@ impl WorldGeometry {
     fn bump_revision(&mut self) {
         self.revision = self.revision.wrapping_add(1);
     }
+
+    fn mark_navigation_dirty(&mut self, area: NavigationDirtyArea) {
+        self.navigation_dirty_areas.push(area);
+    }
+}
+
+fn polygon_bounds(polygon: &[Vec2]) -> NavigationDirtyArea {
+    let mut min = Vec2::splat(f32::MAX);
+    let mut max = Vec2::splat(f32::MIN);
+    for point in polygon {
+        min = min.min(*point);
+        max = max.max(*point);
+    }
+    NavigationDirtyArea { min, max }
 }
 
 #[cfg(test)]

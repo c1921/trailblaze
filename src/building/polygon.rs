@@ -97,20 +97,6 @@ pub fn point_in_polygon(point: Vec2, polygon: &[Vec2]) -> bool {
     true
 }
 
-pub fn segment_intersects_polygon(from: Vec2, to: Vec2, polygon: &[Vec2]) -> bool {
-    if polygon.len() < 3 {
-        return false;
-    }
-    if point_in_polygon(from, polygon) || point_in_polygon(to, polygon) {
-        return true;
-    }
-
-    polygon.iter().enumerate().any(|(index, start)| {
-        let end = polygon[(index + 1) % polygon.len()];
-        segments_intersect(from, to, *start, end)
-    })
-}
-
 pub fn distance_to_polygon(point: Vec2, polygon: &[Vec2]) -> f32 {
     if point_in_polygon(point, polygon) {
         return 0.0;
@@ -162,35 +148,6 @@ fn project_polygon(polygon: &[Vec2], axis: Vec2) -> (f32, f32) {
         .fold((f32::MAX, f32::MIN), |(min, max), value| {
             (min.min(value), max.max(value))
         })
-}
-
-fn segments_intersect(a: Vec2, b: Vec2, c: Vec2, d: Vec2) -> bool {
-    let r = b - a;
-    let s = d - c;
-    let denominator = cross_2d(r, s);
-    let c_minus_a = c - a;
-
-    if denominator.abs() <= GEOMETRY_EPSILON {
-        if cross_2d(c_minus_a, r).abs() > GEOMETRY_EPSILON {
-            return false;
-        }
-        let rr = r.length_squared();
-        if rr <= GEOMETRY_EPSILON {
-            return a.distance(c) <= GEOMETRY_EPSILON;
-        }
-        let t0 = c_minus_a.dot(r) / rr;
-        let t1 = t0 + s.dot(r) / rr;
-        let min_t = t0.min(t1);
-        let max_t = t0.max(t1);
-        return max_t > GEOMETRY_EPSILON && min_t < 1.0 - GEOMETRY_EPSILON;
-    }
-
-    let t = cross_2d(c_minus_a, s) / denominator;
-    let u = cross_2d(c_minus_a, r) / denominator;
-    t >= -GEOMETRY_EPSILON
-        && t <= 1.0 + GEOMETRY_EPSILON
-        && u >= -GEOMETRY_EPSILON
-        && u <= 1.0 + GEOMETRY_EPSILON
 }
 
 fn distance_to_segment(point: Vec2, start: Vec2, end: Vec2) -> f32 {

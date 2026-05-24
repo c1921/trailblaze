@@ -316,7 +316,6 @@ fn spawn_debug_colonists(
                 name: format!("Settler {}", index + 1),
                 state: ColonistState::Idle,
                 speed: 2.2,
-                path_rebuild_timer: 0.0,
                 home: None,
                 satiety: 100.0,
                 carry_capacity: COLONIST_CARRY_CAPACITY,

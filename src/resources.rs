@@ -113,6 +113,7 @@ pub struct ResourceStock {
 }
 
 impl ResourceStock {
+    #[cfg(test)]
     pub fn amount(&self, kind: ResourceKind) -> i32 {
         match kind {
             ResourceKind::Wood => self.wood,
