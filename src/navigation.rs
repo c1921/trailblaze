@@ -47,6 +47,7 @@ pub struct NavGrid {
     dirty_queue: VecDeque<usize>,
     dirty_set: HashSet<usize>,
     revision: u64,
+    chunk_revision: Vec<u64>,
     geometry_revision: Option<u64>,
     initialized: bool,
 }
@@ -73,6 +74,7 @@ impl Default for NavGrid {
             dirty_queue: VecDeque::new(),
             dirty_set: HashSet::new(),
             revision: 0,
+            chunk_revision: vec![0; chunk_count],
             geometry_revision: None,
             initialized: false,
         }
@@ -82,6 +84,22 @@ impl Default for NavGrid {
 impl NavGrid {
     pub fn revision(&self) -> u64 {
         self.revision
+    }
+
+    pub fn path_needs_replan(&self, path: &[Vec3], stored_revision: u64) -> bool {
+        if stored_revision == self.revision {
+            return false;
+        }
+        for point in path {
+            if let Some(cell) = self.cell_at_world(Vec2::new(point.x, point.z)) {
+                if let Some(chunk) = self.chunk_index_for_cell(cell) {
+                    if self.chunk_revision[chunk] > stored_revision {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
     }
 
     #[cfg(test)]
@@ -160,6 +178,8 @@ impl NavGrid {
             }
             self.rebuild_chunk(chunk, geometry, seed);
             self.dirty_chunks[chunk] = false;
+            // Record the revision this chunk will have after the batch increment below
+            self.chunk_revision[chunk] = self.revision.wrapping_add(1);
             rebuilt += 1;
         }
 
@@ -277,7 +297,6 @@ impl NavGrid {
                 }
             }
         }
-        self.revision = self.revision.wrapping_add(1);
     }
 
     fn chunk_world_bounds(&self, min_cell: IVec2, max_cell: IVec2) -> NavigationDirtyArea {

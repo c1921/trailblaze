@@ -1088,7 +1088,7 @@ pub fn update_colonists(
                     continue;
                 }
 
-                if nav_revision != nav_grid.revision() {
+                if nav_grid.path_needs_replan(&path, nav_revision) {
                     colonist.state = moving_state_to_target(
                         &nav_grid,
                         &mut planner,
@@ -1121,7 +1121,7 @@ pub fn update_colonists(
                         target,
                         path,
                         task,
-                        nav_revision,
+                        nav_revision: nav_grid.revision(),
                     };
                 }
             }
@@ -1144,7 +1144,12 @@ pub fn update_colonists(
                     continue;
                 };
 
-                if result.revision != nav_grid.revision() {
+                let path_stale = match &result.path {
+                    Some(path) => nav_grid.path_needs_replan(path, result.revision),
+                    // Conservative: if no path was found and geometry changed, retry
+                    None => result.revision != nav_grid.revision(),
+                };
+                if path_stale {
                     colonist.state = moving_state_to_target(
                         &nav_grid,
                         &mut planner,
