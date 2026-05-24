@@ -12,12 +12,15 @@ mod types;
 mod ui;
 mod world;
 
+use bevy::pbr::wireframe::WireframePlugin;
 use bevy::prelude::*;
+use bevy::render::RenderDebugFlags;
 
 fn main() {
     App::new()
         .insert_resource(ClearColor(Color::srgb(0.76, 0.8, 0.86)))
         .add_plugins(DefaultPlugins)
+        .add_plugins(WireframePlugin { debug_flags: RenderDebugFlags::empty() })
         .add_plugins(bevy::diagnostic::FrameTimeDiagnosticsPlugin::default())
         .add_plugins((
             simulation::SimulationPlugin,

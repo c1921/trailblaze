@@ -1,5 +1,8 @@
 use bevy::{light::NotShadowCaster, prelude::*};
 
+#[derive(Component)]
+pub struct MainLight;
+
 use crate::{
     building::{
         BuildingEntrance, BuildingVisual, CompletedBuilding, EntranceMarker, Footprint,
@@ -114,6 +117,7 @@ pub fn setup_scene(
     };
 
     commands.spawn((
+        MainLight,
         DirectionalLight {
             illuminance: 12_000.0,
             shadows_enabled: true,

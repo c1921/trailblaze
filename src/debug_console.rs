@@ -1,3 +1,4 @@
+use bevy::pbr::wireframe::WireframeConfig;
 use bevy::prelude::*;
 
 use crate::{
@@ -7,13 +8,14 @@ use crate::{
     selection::{SelectedTarget, SelectionState},
     types::ResourceKind,
     ui,
-    world::GameAssets,
+    world::{GameAssets, MainLight},
 };
 
 #[derive(Resource, Default)]
 pub struct DebugConsoleState {
     pub visible: bool,
     pub fast_build: bool,
+    pub wireframe_mode: bool,
 }
 
 #[derive(Component)]
@@ -30,10 +32,14 @@ pub enum DebugButton {
     InstantFinishAll,
     InstantFinishSelected,
     ToggleFastBuild,
+    ToggleWireframe,
 }
 
 #[derive(Component)]
 struct FastBuildLabel;
+
+#[derive(Component)]
+struct WireframeLabel;
 
 pub struct DebugConsolePlugin;
 
@@ -52,6 +58,8 @@ impl Plugin for DebugConsolePlugin {
                     handle_debug_buttons,
                     fast_build_blueprints,
                     update_fast_build_label,
+                    apply_wireframe_mode,
+                    update_wireframe_label,
                 ),
             );
     }
@@ -152,6 +160,22 @@ fn spawn_debug_console(mut commands: Commands) {
                         TextColor(Color::WHITE),
                     ));
                 });
+
+            // Row 6: Wireframe toggle
+            parent
+                .spawn((
+                    Button,
+                    DebugButton::ToggleWireframe,
+                    ui::button_node(),
+                    BackgroundColor(ui::BUTTON),
+                ))
+                .with_children(|btn| {
+                    btn.spawn((
+                        WireframeLabel,
+                        Text::new("Wireframe: OFF"),
+                        TextColor(Color::WHITE),
+                    ));
+                });
         });
 }
 
@@ -241,6 +265,9 @@ fn handle_debug_buttons(
                     DebugButton::ToggleFastBuild => {
                         debug_state.fast_build = !debug_state.fast_build;
                     }
+                    DebugButton::ToggleWireframe => {
+                        debug_state.wireframe_mode = !debug_state.wireframe_mode;
+                    }
                 }
                 *color = BackgroundColor(ui::BUTTON_ACTIVE);
             }
@@ -294,6 +321,46 @@ fn update_fast_build_label(
             "Fast Build: ON".to_string()
         } else {
             "Fast Build: OFF".to_string()
+        };
+    }
+}
+
+fn apply_wireframe_mode(
+    state: Res<DebugConsoleState>,
+    mut wireframe_config: ResMut<WireframeConfig>,
+    mut clear_color: ResMut<ClearColor>,
+    mut lights: Query<&mut DirectionalLight, With<MainLight>>,
+) {
+    if !state.is_changed() {
+        return;
+    }
+    wireframe_config.global = state.wireframe_mode;
+    if state.wireframe_mode {
+        wireframe_config.default_color = Color::srgb(0.25, 0.25, 0.25);
+        clear_color.0 = Color::srgb(0.05, 0.05, 0.08);
+        if let Ok(mut light) = lights.single_mut() {
+            light.illuminance = 0.0;
+            light.shadows_enabled = false;
+        }
+    } else {
+        wireframe_config.default_color = Color::WHITE;
+        clear_color.0 = Color::srgb(0.76, 0.8, 0.86);
+        if let Ok(mut light) = lights.single_mut() {
+            light.illuminance = 12_000.0;
+            light.shadows_enabled = true;
+        }
+    }
+}
+
+fn update_wireframe_label(
+    state: Res<DebugConsoleState>,
+    mut texts: Query<&mut Text, With<WireframeLabel>>,
+) {
+    if let Ok(mut text) = texts.single_mut() {
+        text.0 = if state.wireframe_mode {
+            "Wireframe: ON".to_string()
+        } else {
+            "Wireframe: OFF".to_string()
         };
     }
 }
