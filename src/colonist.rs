@@ -20,6 +20,8 @@ const SATIETY_LOSS_SECONDS: f32 = 10.0;
 const HUNGER_THRESHOLD: f32 = 50.0;
 const EAT_RESTORE: f32 = 50.0;
 const EAT_REST_SECONDS: f32 = 2.0;
+const PATH_REBUILD_INTERVAL: f32 = 0.25;
+const GATHER_PATH_CANDIDATE_LIMIT: usize = 12;
 
 pub struct ColonistPlugin;
 
@@ -70,6 +72,7 @@ pub enum ColonistState {
     Gathering {
         resource: Entity,
         kind: ResourceKind,
+        amount: i32,
         timer: f32,
     },
     Building {
@@ -100,6 +103,7 @@ pub enum Task {
     Gather {
         resource: Entity,
         kind: ResourceKind,
+        amount: i32,
     },
     Deposit {
         inventory: Entity,
@@ -242,7 +246,7 @@ pub fn assign_idle_colonists(
     >,
 ) {
     let seed = terrain_seed.0;
-    let mut reserved_deliveries = active_material_deliveries(&colonists);
+    let mut reservations = AssignmentReservations::from_colonists(&colonists);
     let has_woodcutter = completed
         .iter()
         .any(|(building, _, _)| building.kind == BuildingKind::Woodcutter);
@@ -278,10 +282,10 @@ pub fn assign_idle_colonists(
             &colonist,
             &blueprints,
             &inventories,
-            &reserved_deliveries,
+            &reservations,
             seed,
         ) {
-            reserved_deliveries.push((blueprint, amount));
+            reservations.reserve_material_delivery(blueprint, amount);
             colonist.state = state;
             assigned = true;
         }
@@ -302,60 +306,138 @@ pub fn assign_idle_colonists(
         }
 
         if has_woodcutter {
-            if let Some((_, state)) = gather_candidate(
+            if let Some((_, resource, amount, state)) = gather_candidate(
                 &geometry,
                 &mut *cache,
                 start,
                 ResourceKind::Wood,
                 &resources,
                 &inventories,
+                &reservations,
+                colonist.carry_capacity,
                 seed,
             ) {
+                reservations.reserve_gather(resource, ResourceKind::Wood, amount);
                 colonist.state = state;
                 continue;
             }
         }
 
         if has_gatherer {
-            if let Some((_, state)) = gather_candidate(
+            if let Some((_, resource, amount, state)) = gather_candidate(
                 &geometry,
                 &mut *cache,
                 start,
                 ResourceKind::Food,
                 &resources,
                 &inventories,
+                &reservations,
+                colonist.carry_capacity,
                 seed,
             ) {
+                reservations.reserve_gather(resource, ResourceKind::Food, amount);
                 colonist.state = state;
             }
         }
     }
 }
 
-fn active_material_deliveries(
-    colonists: &Query<(&mut Colonist, &Transform)>,
-) -> Vec<(Entity, i32)> {
-    colonists
-        .iter()
-        .filter_map(|(colonist, _)| match &colonist.state {
-            ColonistState::Moving {
-                task:
-                    Task::PickupMaterial {
-                        blueprint,
-                        kind: ResourceKind::Wood,
-                        amount,
-                        ..
-                    }
-                    | Task::DeliverMaterial {
-                        blueprint,
-                        kind: ResourceKind::Wood,
-                        amount,
-                    },
+#[derive(Default)]
+struct AssignmentReservations {
+    material_deliveries: Vec<(Entity, i32)>,
+    gathered_resources: Vec<(Entity, i32)>,
+    public_deposits: Vec<(ResourceKind, i32)>,
+}
+
+impl AssignmentReservations {
+    fn from_colonists(colonists: &Query<(&mut Colonist, &Transform)>) -> Self {
+        let mut reservations = Self::default();
+        for (colonist, _) in colonists.iter() {
+            reservations.reserve_state(&colonist.state);
+        }
+        reservations
+    }
+
+    fn reserve_state(&mut self, state: &ColonistState) {
+        match state {
+            ColonistState::Moving { task, .. } => self.reserve_task(task),
+            ColonistState::Gathering {
+                resource,
+                kind,
+                amount,
                 ..
-            } => Some((*blueprint, *amount)),
-            _ => None,
-        })
-        .collect()
+            } => {
+                self.reserve_gather(*resource, *kind, *amount);
+            }
+            ColonistState::Idle | ColonistState::Building { .. } | ColonistState::Eating { .. } => {
+            }
+        }
+    }
+
+    fn reserve_task(&mut self, task: &Task) {
+        match task {
+            Task::PickupMaterial {
+                blueprint,
+                kind: ResourceKind::Wood,
+                amount,
+                ..
+            }
+            | Task::DeliverMaterial {
+                blueprint,
+                kind: ResourceKind::Wood,
+                amount,
+            } => self.reserve_material_delivery(*blueprint, *amount),
+            Task::Gather {
+                resource,
+                kind,
+                amount,
+            } => self.reserve_gather(*resource, *kind, *amount),
+            Task::Deposit { kind, amount, .. } => self.reserve_public_deposit(*kind, *amount),
+            Task::PickupMaterial { .. }
+            | Task::DeliverMaterial { .. }
+            | Task::Build { .. }
+            | Task::Eat { .. }
+            | Task::PickupHomeFood { .. }
+            | Task::DeliverHomeFood { .. } => {}
+        }
+    }
+
+    fn reserve_material_delivery(&mut self, blueprint: Entity, amount: i32) {
+        self.material_deliveries.push((blueprint, amount.max(0)));
+    }
+
+    fn reserved_material_delivery(&self, blueprint: Entity) -> i32 {
+        self.material_deliveries
+            .iter()
+            .filter(|(entity, _)| *entity == blueprint)
+            .map(|(_, amount)| *amount)
+            .sum()
+    }
+
+    fn reserve_gather(&mut self, resource: Entity, kind: ResourceKind, amount: i32) {
+        let amount = amount.max(0);
+        self.gathered_resources.push((resource, amount));
+        self.reserve_public_deposit(kind, amount);
+    }
+
+    fn reserved_gather(&self, resource: Entity) -> i32 {
+        self.gathered_resources
+            .iter()
+            .filter(|(entity, _)| *entity == resource)
+            .map(|(_, amount)| *amount)
+            .sum()
+    }
+
+    fn reserve_public_deposit(&mut self, kind: ResourceKind, amount: i32) {
+        self.public_deposits.push((kind, amount.max(0)));
+    }
+
+    fn reserved_public_capacity(&self) -> i32 {
+        self.public_deposits
+            .iter()
+            .map(|(kind, amount)| *amount * kind.unit_size())
+            .sum()
+    }
 }
 
 fn eat_candidate(
@@ -441,17 +523,13 @@ fn material_delivery_candidate(
         ),
         Without<Colonist>,
     >,
-    reserved_deliveries: &[(Entity, i32)],
+    reservations: &AssignmentReservations,
     seed: u64,
 ) -> Option<(Entity, i32, ColonistState)> {
     let mut candidates: Vec<(i32, f32, Entity, i32, Vec3, Task)> = Vec::new();
 
     for (blueprint_entity, blueprint, blueprint_transform, blueprint_entrance) in blueprints {
-        let reserved = reserved_deliveries
-            .iter()
-            .filter(|(target, _)| *target == blueprint_entity)
-            .map(|(_, wood)| *wood)
-            .sum::<i32>();
+        let reserved = reservations.reserved_material_delivery(blueprint_entity);
         let remaining = blueprint.needs_wood() - reserved;
         if remaining <= 0 {
             continue;
@@ -620,39 +698,86 @@ fn gather_candidate(
         ),
         Without<Colonist>,
     >,
+    reservations: &AssignmentReservations,
+    carry_capacity: i32,
     seed: u64,
-) -> Option<(usize, ColonistState)> {
-    if total_public_addable(inventories, kind) <= 0 {
+) -> Option<(usize, Entity, i32, ColonistState)> {
+    let public_capacity = total_public_addable_after_reserved(inventories, reservations, kind);
+    if public_capacity <= 0 {
         return None;
     }
 
-    let mut candidates: Vec<(f32, Entity, Vec3)> = resources
-        .iter()
-        .filter(|(_, node, _)| node.kind == kind && node.amount > 0)
-        .map(|(resource, _, transform)| {
-            (
-                xz_distance(start, transform.translation),
-                resource,
-                transform.translation,
-            )
-        })
-        .collect();
+    let candidates = gather_candidate_snapshots(
+        start,
+        kind,
+        carry_capacity,
+        public_capacity,
+        resources.iter().map(|(entity, node, transform)| {
+            (entity, node.kind, node.amount, transform.translation)
+        }),
+        reservations,
+    );
 
-    candidates.sort_by(|(dist_a, ..), (dist_b, ..)| dist_a.total_cmp(dist_b));
-
-    for (_, resource, pos) in candidates {
+    for candidate in candidates.into_iter().take(GATHER_PATH_CANDIDATE_LIMIT) {
         if let Some(result) = movement_to_resource(
             geometry,
             cache,
             start,
-            pos,
-            Task::Gather { resource, kind },
+            candidate.position,
+            Task::Gather {
+                resource: candidate.resource,
+                kind,
+                amount: candidate.amount,
+            },
             seed,
         ) {
-            return Some(result);
+            return Some((result.0, candidate.resource, candidate.amount, result.1));
         }
     }
     None
+}
+
+#[derive(Clone, Copy, Debug)]
+struct GatherCandidateSnapshot {
+    distance: f32,
+    resource: Entity,
+    position: Vec3,
+    amount: i32,
+}
+
+fn gather_candidate_snapshots(
+    start: Vec3,
+    kind: ResourceKind,
+    carry_capacity: i32,
+    public_capacity: i32,
+    resources: impl IntoIterator<Item = (Entity, ResourceKind, i32, Vec3)>,
+    reservations: &AssignmentReservations,
+) -> Vec<GatherCandidateSnapshot> {
+    let mut candidates: Vec<_> = resources
+        .into_iter()
+        .filter_map(|(resource, resource_kind, node_amount, position)| {
+            if resource_kind != kind {
+                return None;
+            }
+
+            let available = (node_amount - reservations.reserved_gather(resource)).max(0);
+            let amount = carried_amount(kind, carry_capacity)
+                .min(available)
+                .min(public_capacity);
+            if amount <= 0 {
+                return None;
+            }
+
+            Some(GatherCandidateSnapshot {
+                distance: xz_distance(start, position),
+                resource,
+                position,
+                amount,
+            })
+        })
+        .collect();
+    candidates.sort_by(|left, right| left.distance.total_cmp(&right.distance));
+    candidates
 }
 
 fn total_public_addable(
@@ -675,6 +800,30 @@ fn total_public_addable(
         .filter(|(_, _, _, _, public, _, _)| public.is_some())
         .map(|(_, inventory, _, _, _, _, _)| inventory.max_addable(kind))
         .sum()
+}
+
+fn total_public_addable_after_reserved(
+    inventories: &Query<
+        (
+            Entity,
+            &Inventory,
+            &Transform,
+            Option<&BuildingEntrance>,
+            Option<&PublicInventory>,
+            Option<&Housing>,
+            Option<&CompletedBuilding>,
+        ),
+        Without<Colonist>,
+    >,
+    reservations: &AssignmentReservations,
+    kind: ResourceKind,
+) -> i32 {
+    let capacity = inventories
+        .iter()
+        .filter(|(_, _, _, _, public, _, _)| public.is_some())
+        .map(|(_, inventory, _, _, _, _, _)| inventory.max_addable(kind) * kind.unit_size())
+        .sum::<i32>();
+    (capacity - reservations.reserved_public_capacity()).max(0) / kind.unit_size()
 }
 
 fn building_interaction_position(
@@ -861,7 +1010,6 @@ pub fn update_colonists(
     if dt == 0.0 {
         return;
     }
-    cache.clear();
 
     for (mut colonist, mut transform) in &mut colonists {
         if colonist.satiety <= 0.0 {
@@ -885,22 +1033,22 @@ pub fn update_colonists(
                 mut path,
                 task,
             } => {
+                if !moving_task_is_valid(&task, &mut resources) {
+                    colonist.state = ColonistState::Idle;
+                    continue;
+                }
+
                 let path_blocked = if !path.is_empty() {
                     !line_of_sight_clear(&geometry, transform.translation, path[0])
                 } else {
                     false
                 };
 
-                let needs_rebuild = if path_blocked
-                    || (colonist.path_rebuild_timer <= 0.0
-                        && path_needs_rebuild(&path, transform.translation, target, &geometry))
-                {
-                    colonist.path_rebuild_timer = 0.25;
-                    true
-                } else {
-                    colonist.path_rebuild_timer -= dt;
-                    false
-                };
+                let validate_path =
+                    advance_path_rebuild_timer(&mut colonist.path_rebuild_timer, dt, path_blocked);
+                let needs_rebuild = path_blocked
+                    || (validate_path
+                        && path_needs_rebuild(&path, transform.translation, target, &geometry));
 
                 if needs_rebuild {
                     if let Some((state, _)) = moving_state_to_target(
@@ -942,6 +1090,7 @@ pub fn update_colonists(
             ColonistState::Gathering {
                 resource,
                 kind,
+                amount: planned_amount,
                 mut timer,
             } => {
                 timer += dt;
@@ -949,6 +1098,7 @@ pub fn update_colonists(
                     colonist.state = ColonistState::Gathering {
                         resource,
                         kind,
+                        amount: planned_amount,
                         timer,
                     };
                     continue;
@@ -965,9 +1115,7 @@ pub fn update_colonists(
 
                 let mut amount = 0;
                 if let Ok(mut node) = resources.get_mut(resource) {
-                    amount = carried_amount(kind, colonist.carry_capacity)
-                        .min(node.amount)
-                        .min(public_capacity);
+                    amount = planned_amount.min(node.amount).min(public_capacity);
                     node.amount -= amount;
                     if amount > 0 && node.amount <= 0 {
                         geometry.release_entity(resource);
@@ -1091,9 +1239,14 @@ fn complete_movement_task(
             ColonistState::Idle
         }
         Task::Build { blueprint } => ColonistState::Building { blueprint },
-        Task::Gather { resource, kind } => ColonistState::Gathering {
+        Task::Gather {
             resource,
             kind,
+            amount,
+        } => ColonistState::Gathering {
+            resource,
+            kind,
+            amount,
             timer: 0.0,
         },
         Task::Deposit {
@@ -1286,6 +1439,41 @@ fn add_to_nearest_public(
     remaining
 }
 
+fn moving_task_is_valid(task: &Task, resources: &mut Query<&mut ResourceNode>) -> bool {
+    match task {
+        Task::Gather {
+            resource,
+            kind,
+            amount,
+        } => resources
+            .get_mut(*resource)
+            .map(|node| node.kind == *kind && node.amount >= *amount && *amount > 0)
+            .unwrap_or(false),
+        Task::PickupMaterial { .. }
+        | Task::DeliverMaterial { .. }
+        | Task::Build { .. }
+        | Task::Deposit { .. }
+        | Task::Eat { .. }
+        | Task::PickupHomeFood { .. }
+        | Task::DeliverHomeFood { .. } => true,
+    }
+}
+
+fn advance_path_rebuild_timer(timer: &mut f32, dt: f32, path_blocked: bool) -> bool {
+    if path_blocked {
+        *timer = PATH_REBUILD_INTERVAL;
+        return true;
+    }
+
+    *timer -= dt;
+    if *timer > 0.0 {
+        return false;
+    }
+
+    *timer = PATH_REBUILD_INTERVAL;
+    true
+}
+
 fn path_needs_rebuild(
     path: &[Vec3],
     current: Vec3,
@@ -1419,6 +1607,10 @@ mod tests {
 
     const SEED: u64 = DEFAULT_TERRAIN_SEED;
 
+    fn test_entity(index: u32) -> Entity {
+        Entity::from_raw_u32(index).unwrap()
+    }
+
     #[test]
     fn move_along_path_advances_one_waypoint_at_a_time() {
         let mut transform = Transform::from_translation(Vec3::new(
@@ -1505,5 +1697,92 @@ mod tests {
         let selected = best_home_candidate(&homes, Vec3::ZERO).unwrap();
 
         assert_eq!(homes[selected].0, far_empty);
+    }
+
+    #[test]
+    fn gather_reservation_exhausts_single_node_for_next_worker() {
+        let resource = test_entity(1);
+        let mut reservations = AssignmentReservations::default();
+        let resources = vec![(resource, ResourceKind::Food, 10, Vec3::new(1.0, 0.0, 0.0))];
+
+        let candidates = gather_candidate_snapshots(
+            Vec3::ZERO,
+            ResourceKind::Food,
+            COLONIST_CARRY_CAPACITY,
+            20,
+            resources.clone(),
+            &reservations,
+        );
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].amount, 10);
+
+        reservations.reserve_gather(resource, ResourceKind::Food, candidates[0].amount);
+        let candidates = gather_candidate_snapshots(
+            Vec3::ZERO,
+            ResourceKind::Food,
+            COLONIST_CARRY_CAPACITY,
+            20,
+            resources,
+            &reservations,
+        );
+
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn gather_reservation_moves_next_worker_to_next_node() {
+        let near = test_entity(1);
+        let far = test_entity(2);
+        let mut reservations = AssignmentReservations::default();
+        reservations.reserve_gather(near, ResourceKind::Food, 10);
+
+        let candidates = gather_candidate_snapshots(
+            Vec3::ZERO,
+            ResourceKind::Food,
+            COLONIST_CARRY_CAPACITY,
+            20,
+            vec![
+                (near, ResourceKind::Food, 10, Vec3::new(1.0, 0.0, 0.0)),
+                (far, ResourceKind::Food, 10, Vec3::new(3.0, 0.0, 0.0)),
+            ],
+            &reservations,
+        );
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].resource, far);
+    }
+
+    #[test]
+    fn public_capacity_reservation_blocks_extra_gathering() {
+        let resource = test_entity(1);
+        let mut reservations = AssignmentReservations::default();
+        reservations.reserve_public_deposit(ResourceKind::Food, 10);
+        let public_capacity = ((10 * ResourceKind::Food.unit_size())
+            - reservations.reserved_public_capacity())
+        .max(0)
+            / ResourceKind::Food.unit_size();
+
+        let candidates = gather_candidate_snapshots(
+            Vec3::ZERO,
+            ResourceKind::Food,
+            COLONIST_CARRY_CAPACITY,
+            public_capacity,
+            vec![(resource, ResourceKind::Food, 20, Vec3::new(1.0, 0.0, 0.0))],
+            &reservations,
+        );
+
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn path_rebuild_timer_resets_after_validation_tick() {
+        let mut timer = 0.0;
+
+        assert!(advance_path_rebuild_timer(&mut timer, 0.016, false));
+        assert_eq!(timer, PATH_REBUILD_INTERVAL);
+
+        assert!(!advance_path_rebuild_timer(&mut timer, 0.016, false));
+        assert!(timer > 0.0);
+        assert!(timer < PATH_REBUILD_INTERVAL);
     }
 }

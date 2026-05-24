@@ -4,12 +4,12 @@ use crate::math::{within_world_bounds, xz};
 use crate::terrain::max_slope_in_polygon;
 
 use super::PlacementIssue;
+#[cfg(test)]
+use super::polygon::{cell_center_2d, cell_polygon};
 use super::polygon::{
     distance_to_polygon, expanded_polygon, point_in_polygon, polygons_intersect,
     segment_intersects_polygon,
 };
-#[cfg(test)]
-use super::polygon::{cell_center_2d, cell_polygon};
 #[cfg(test)]
 use crate::types::within_map;
 
@@ -32,6 +32,7 @@ pub struct ReservedEntrance {
 pub struct WorldGeometry {
     obstacles: Vec<Obstacle>,
     reserved_entrances: Vec<ReservedEntrance>,
+    revision: u64,
 }
 
 #[cfg(test)]
@@ -167,6 +168,7 @@ impl WorldGeometry {
             polygon,
             passable,
         });
+        self.bump_revision();
     }
 
     #[cfg(test)]
@@ -181,12 +183,19 @@ impl WorldGeometry {
     pub fn reserve_entrance_point_2d(&mut self, position: Vec2, entity: Entity) {
         self.reserved_entrances
             .push(ReservedEntrance { entity, position });
+        self.bump_revision();
     }
 
     pub fn release_entity(&mut self, entity: Entity) {
+        let obstacle_count = self.obstacles.len();
+        let reserved_count = self.reserved_entrances.len();
         self.obstacles.retain(|obstacle| obstacle.entity != entity);
         self.reserved_entrances
             .retain(|reserved| reserved.entity != entity);
+        if self.obstacles.len() != obstacle_count || self.reserved_entrances.len() != reserved_count
+        {
+            self.bump_revision();
+        }
     }
 
     #[cfg(test)]
@@ -209,6 +218,10 @@ impl WorldGeometry {
 
     pub fn obstacles(&self) -> &[Obstacle] {
         &self.obstacles
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     pub fn segment_clear(&self, from: Vec3, to: Vec3, padding: f32) -> bool {
@@ -241,6 +254,10 @@ impl WorldGeometry {
         }
 
         (self.obstacles.len(), road_cells, entities.len())
+    }
+
+    fn bump_revision(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
     }
 }
 

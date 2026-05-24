@@ -1,4 +1,7 @@
-use std::{cmp::Ordering, collections::{BinaryHeap, HashMap}};
+use std::{
+    cmp::Ordering,
+    collections::{BinaryHeap, HashMap},
+};
 
 use bevy::prelude::*;
 
@@ -16,11 +19,21 @@ const CACHE_GRID: f32 = 0.5;
 #[derive(Resource, Default)]
 pub struct PathCache {
     cache: HashMap<(i32, i32, i32, i32), Option<Vec<Vec3>>>,
+    geometry_revision: Option<u64>,
 }
 
 impl PathCache {
     pub fn clear(&mut self) {
         self.cache.clear();
+    }
+
+    fn sync_geometry(&mut self, revision: u64) {
+        if self.geometry_revision == Some(revision) {
+            return;
+        }
+
+        self.clear();
+        self.geometry_revision = Some(revision);
     }
 }
 
@@ -74,6 +87,8 @@ pub fn path_to_waypoints(
     target: Vec3,
     seed: u64,
 ) -> Option<Vec<Vec3>> {
+    cache.sync_geometry(geometry.revision());
+
     let key = (
         snap_to_cache_grid(start.x),
         snap_to_cache_grid(start.z),
@@ -90,7 +105,12 @@ pub fn path_to_waypoints(
     result
 }
 
-fn compute_path(geometry: &WorldGeometry, start: Vec3, target: Vec3, seed: u64) -> Option<Vec<Vec3>> {
+fn compute_path(
+    geometry: &WorldGeometry,
+    start: Vec3,
+    target: Vec3,
+    seed: u64,
+) -> Option<Vec<Vec3>> {
     let target = Vec3::new(target.x, start.y, target.z);
     if xz_distance(start, target) < 0.001 {
         return Some(Vec::new());
@@ -277,14 +297,7 @@ mod tests {
         let target = Vec3::new(3.2, terrain_height(SEED, 3.2, 0.73), 0.73);
 
         let mut cache = PathCache::default();
-        let path = path_to_waypoints(
-            &geometry,
-            &mut cache,
-            start,
-            target,
-            SEED,
-        )
-        .unwrap();
+        let path = path_to_waypoints(&geometry, &mut cache, start, target, SEED).unwrap();
 
         assert!(path.len() >= 2);
         assert_eq!(path.last().copied(), Some(target));
@@ -310,5 +323,26 @@ mod tests {
         let path = path_to_waypoints(&geometry, &mut cache, start, target, SEED).unwrap();
 
         assert_eq!(path, vec![target]);
+    }
+
+    #[test]
+    fn cache_invalidates_when_geometry_revision_changes() {
+        let mut geometry = WorldGeometry::default();
+        let start = Vec3::new(0.0, terrain_height(SEED, 0.0, 0.13), 0.13);
+        let target = Vec3::new(3.2, terrain_height(SEED, 3.2, 0.73), 0.73);
+        let mut cache = PathCache::default();
+
+        let direct = path_to_waypoints(&geometry, &mut cache, start, target, SEED).unwrap();
+        assert_eq!(direct, vec![target]);
+
+        geometry.occupy_polygon(
+            rectangle_polygon(Vec3::new(1.5, 0.0, 0.0), Vec2::new(0.9, 1.2), 0.2),
+            test_entity(1),
+            false,
+        );
+
+        let routed = path_to_waypoints(&geometry, &mut cache, start, target, SEED).unwrap();
+        assert!(routed.len() >= 2);
+        assert_ne!(routed, direct);
     }
 }
