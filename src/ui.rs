@@ -1,9 +1,9 @@
 use bevy::prelude::*;
 
 use crate::{
-    building::{Blueprint, BuildState, CompletedBuilding, WorldGeometry},
+    building::{Blueprint, BuildState, CompletedBuilding, Housing, WorldGeometry},
     colonist::Colonist,
-    resources::ResourceStock,
+    resources::{CentralStorage, Inventory, PublicInventory, public_stock},
     selection::{SelectedTarget, SelectionState},
     simulation::SimulationClock,
     terrain::TerrainGenerationConfig,
@@ -238,7 +238,6 @@ pub fn handle_ui_buttons(
 }
 
 pub fn update_ui_text(
-    stock: Res<ResourceStock>,
     clock: Res<SimulationClock>,
     diagnostics: Res<bevy::diagnostic::DiagnosticsStore>,
     terrain_config: Res<TerrainGenerationConfig>,
@@ -246,9 +245,16 @@ pub fn update_ui_text(
     geometry: Res<WorldGeometry>,
     selection: Res<SelectionState>,
     colonists: Query<(Entity, &Colonist)>,
-    completed: Query<(Entity, &CompletedBuilding)>,
+    completed: Query<(
+        Entity,
+        &CompletedBuilding,
+        Option<&Inventory>,
+        Option<&Housing>,
+        Option<&CentralStorage>,
+    )>,
     blueprints: Query<(Entity, &Blueprint)>,
     resource_nodes: Query<(Entity, &ResourceNode)>,
+    public_inventories: Query<&Inventory, With<PublicInventory>>,
     mut text_queries: ParamSet<(
         Query<&mut Text, With<ResourceText>>,
         Query<&mut Text, With<StatusText>>,
@@ -258,11 +264,16 @@ pub fn update_ui_text(
         Query<&mut Text, With<FpsText>>,
     )>,
 ) {
+    let stock = public_stock(public_inventories.iter());
     let population = colonists.iter().count() as i32;
     let capacity: i32 = completed
         .iter()
-        .map(|(_, building)| building.kind.definition().population_capacity)
+        .map(|(_, building, _, _, _)| building.kind.definition().population_capacity)
         .sum();
+    let homeless = colonists
+        .iter()
+        .filter(|(_, colonist)| colonist.home.is_none())
+        .count();
     let idle_count = colonists
         .iter()
         .filter(|(_, colonist)| matches!(colonist.state, crate::colonist::ColonistState::Idle))
@@ -272,13 +283,14 @@ pub fn update_ui_text(
 
     if let Ok(mut text) = text_queries.p0().single_mut() {
         text.0 = format!(
-            "{}: {}  {}: {}  Pop: {}/{}  Idle: {}  Time: {}",
+            "{}: {}  {}: {}  Pop: {}/{}  Homeless: {}  Idle: {}  Time: {}",
             ResourceKind::Wood.label(),
             stock.wood,
             ResourceKind::Food.label(),
             stock.food,
             population,
             capacity,
+            homeless,
             idle_count,
             clock.label()
         );
@@ -397,7 +409,13 @@ fn hotkey_label(kind: BuildingKind) -> &'static str {
 fn selected_panel_text(
     selection: &SelectionState,
     colonists: &Query<(Entity, &Colonist)>,
-    completed: &Query<(Entity, &CompletedBuilding)>,
+    completed: &Query<(
+        Entity,
+        &CompletedBuilding,
+        Option<&Inventory>,
+        Option<&Housing>,
+        Option<&CentralStorage>,
+    )>,
     blueprints: &Query<(Entity, &Blueprint)>,
     resource_nodes: &Query<(Entity, &ResourceNode)>,
 ) -> (String, String) {
@@ -412,11 +430,17 @@ fn selected_panel_text(
         SelectedTarget::Colonist(entity) => colonists
             .get(entity)
             .map(|(_, colonist)| {
+                let home = colonist
+                    .home
+                    .map(|entity| format!("{entity:?}"))
+                    .unwrap_or_else(|| "None".to_string());
                 (
                     colonist.name.clone(),
                     format!(
-                        "Status: {}\nSpeed: {:.1}",
+                        "Status: {}\nSatiety: {:.0}/100\nHome: {}\nSpeed: {:.1}",
                         colonist.status_label(),
+                        colonist.satiety,
+                        home,
                         colonist.speed
                     ),
                 )
@@ -431,7 +455,7 @@ fn selected_panel_text(
                 };
                 let enabled = completed
                     .iter()
-                    .any(|(_, building)| building.kind == required_building);
+                    .any(|(_, building, _, _, _)| building.kind == required_building);
                 (
                     format!("{} node", node.kind.label()),
                     format!(
@@ -466,20 +490,36 @@ fn selected_panel_text(
             .unwrap_or_else(|_| missing_selection()),
         SelectedTarget::Building(entity) => completed
             .get(entity)
-            .map(|(_, building)| {
+            .map(|(_, building, inventory, housing, central)| {
                 let definition = building.kind.definition();
-                (
-                    definition.label.to_string(),
-                    format!(
-                        "{}\nCapacity: {}\nStatus: Operating",
-                        building.kind.description(),
-                        if definition.population_capacity > 0 {
-                            definition.population_capacity.to_string()
-                        } else {
-                            "None".to_string()
-                        }
-                    ),
-                )
+                let title = if central.is_some() {
+                    "Central Storage".to_string()
+                } else {
+                    definition.label.to_string()
+                };
+                let mut body = format!("{}\nStatus: Operating", building.kind.description());
+
+                if let Some(housing) = housing {
+                    body.push_str(&format!(
+                        "\nResidents: {}/{}",
+                        housing.resident_count(),
+                        Housing::CAPACITY
+                    ));
+                } else if definition.population_capacity > 0 {
+                    body.push_str(&format!("\nCapacity: {}", definition.population_capacity));
+                }
+
+                if let Some(inventory) = inventory {
+                    body.push_str(&format!(
+                        "\nInventory: Wood {}  Food {}\nCapacity: {}/{}",
+                        inventory.wood,
+                        inventory.food,
+                        inventory.used_capacity(),
+                        inventory.capacity
+                    ));
+                }
+
+                (title, body)
             })
             .unwrap_or_else(|_| missing_selection()),
     }

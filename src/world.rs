@@ -1,14 +1,24 @@
 use bevy::{light::NotShadowCaster, prelude::*};
 
 use crate::{
-    building::{WorldGeometry, resource_obstacle_polygon},
+    building::{
+        BuildingEntrance, BuildingVisual, CompletedBuilding, EntranceMarker, Footprint,
+        WorldGeometry, footprint_polygon, resource_obstacle_polygon,
+    },
     camera,
     colonist::{Colonist, ColonistState},
+    resources::{
+        CENTRAL_STORAGE_CAPACITY, COLONIST_CARRY_CAPACITY, CentralStorage, Inventory,
+        PublicInventory,
+    },
     terrain::{
         GeneratedResource, GeneratedTerrain, TerrainGenerationConfig, TerrainKind, TerrainSeed,
         generate_terrain, terrain_height, terrain_kind_at,
     },
-    types::{BuildingKind, CELL_SIZE, ResourceKind, building_color},
+    types::{
+        BuildingKind, CELL_SIZE, ResourceKind, building_color, entrance_local_offset,
+        entrance_world_position,
+    },
 };
 
 pub struct WorldPlugin;
@@ -102,7 +112,6 @@ pub fn setup_scene(
         colonist_mesh: colonist_mesh.clone(),
         colonist_material: colonist_material.clone(),
     };
-    commands.insert_resource(assets);
 
     commands.spawn((
         DirectionalLight {
@@ -130,8 +139,84 @@ pub fn setup_scene(
         &food_material,
         &terrain.resources,
     );
-    spawn_colonists(&mut commands, &colonist_mesh, &colonist_material, terrain_seed.0);
+    spawn_central_storage(&mut commands, &mut geometry, &assets, terrain_seed.0);
+    spawn_colonists(
+        &mut commands,
+        &colonist_mesh,
+        &colonist_material,
+        terrain_seed.0,
+    );
     camera::spawn_camera(&mut commands, terrain_seed.0);
+    commands.insert_resource(assets);
+}
+
+fn spawn_central_storage(
+    commands: &mut Commands,
+    geometry: &mut WorldGeometry,
+    assets: &GameAssets,
+    seed: u64,
+) {
+    let definition = BuildingKind::Storage.definition();
+    let position = Vec3::new(0.0, terrain_height(seed, 0.0, 0.0), 0.0);
+    let rotation = Quat::IDENTITY;
+    let polygon = footprint_polygon(BuildingKind::Storage, position, definition.size, 0.0);
+    let direction = BuildingKind::Storage.entrance_direction().unwrap();
+    let local_offset = entrance_local_offset(definition.size, direction);
+    let entrance_position = entrance_world_position(position, definition.size, 0.0, direction);
+    let mut inventory = Inventory::public(CENTRAL_STORAGE_CAPACITY);
+    inventory.add(ResourceKind::Wood, 40);
+    inventory.add(ResourceKind::Food, 20);
+
+    let entity = commands
+        .spawn((
+            Transform {
+                translation: position,
+                rotation,
+                scale: Vec3::ONE,
+            },
+            Visibility::Visible,
+            CompletedBuilding {
+                kind: BuildingKind::Storage,
+            },
+            Footprint {
+                polygon: polygon.clone(),
+                passable: false,
+            },
+            BuildingEntrance {
+                world_position: entrance_position,
+                local_offset,
+            },
+            inventory,
+            PublicInventory,
+            CentralStorage,
+        ))
+        .id();
+
+    commands.spawn((
+        Mesh3d(assets.cube_mesh.clone()),
+        MeshMaterial3d(assets.storage_material.clone()),
+        Transform::from_translation(Vec3::new(0.0, definition.height * 0.5, 0.0)).with_scale(
+            Vec3::new(
+                definition.size.x as f32 * CELL_SIZE * 0.9,
+                definition.height,
+                definition.size.y as f32 * CELL_SIZE * 0.9,
+            ),
+        ),
+        BuildingVisual { owner: entity },
+        ChildOf(entity),
+    ));
+
+    commands.spawn((
+        Mesh3d(assets.cube_mesh.clone()),
+        MeshMaterial3d(assets.entrance_material.clone()),
+        Transform::from_translation(Vec3::new(local_offset.x, 0.04, local_offset.z))
+            .with_scale(Vec3::new(0.42, 0.08, 0.42)),
+        EntranceMarker { owner: entity },
+        ChildOf(entity),
+    ));
+
+    geometry.occupy_polygon(polygon, entity, false);
+    geometry.reserve_entrance_point(entrance_position, entity);
 }
 
 fn spawn_terrain_tiles(
@@ -295,6 +380,9 @@ fn spawn_colonists(
                 state: ColonistState::Idle,
                 speed: 2.2,
                 path_rebuild_timer: 0.0,
+                home: None,
+                satiety: 100.0,
+                carry_capacity: COLONIST_CARRY_CAPACITY,
             },
         ));
     }

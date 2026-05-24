@@ -17,7 +17,6 @@ use bevy::prelude::*;
 fn main() {
     App::new()
         .insert_resource(ClearColor(Color::srgb(0.76, 0.8, 0.86)))
-        .init_resource::<resources::ResourceStock>()
         .add_plugins(DefaultPlugins)
         .add_plugins(bevy::diagnostic::FrameTimeDiagnosticsPlugin::default())
         .add_plugins((

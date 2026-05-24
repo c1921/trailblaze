@@ -86,6 +86,36 @@ pub struct CompletedBuilding {
     pub kind: BuildingKind,
 }
 
+#[derive(Component, Debug, Default)]
+pub struct Housing {
+    pub residents: Vec<Entity>,
+}
+
+impl Housing {
+    pub const CAPACITY: usize = 5;
+
+    pub fn resident_count(&self) -> usize {
+        self.residents.len()
+    }
+
+    pub fn has_space(&self) -> bool {
+        self.resident_count() < Self::CAPACITY
+    }
+
+    pub fn add_resident(&mut self, resident: Entity) -> bool {
+        if self.residents.contains(&resident) || !self.has_space() {
+            return false;
+        }
+
+        self.residents.push(resident);
+        true
+    }
+
+    pub fn remove_resident(&mut self, resident: Entity) {
+        self.residents.retain(|entity| *entity != resident);
+    }
+}
+
 #[derive(Component, Debug, Clone, Copy)]
 pub struct BuildingEntrance {
     pub world_position: Vec3,
@@ -133,5 +163,18 @@ mod tests {
         assert_eq!(blueprint.status(), BlueprintStatus::Building);
         blueprint.progress = 5.0;
         assert_eq!(blueprint.status(), BlueprintStatus::Complete);
+    }
+
+    #[test]
+    fn housing_capacity_is_five_residents() {
+        let mut housing = Housing::default();
+
+        for index in 0..Housing::CAPACITY {
+            assert!(housing.add_resident(Entity::from_raw_u32(index as u32).unwrap()));
+        }
+
+        assert!(!housing.has_space());
+        assert!(!housing.add_resident(Entity::from_raw_u32(99).unwrap()));
+        assert_eq!(housing.resident_count(), 5);
     }
 }

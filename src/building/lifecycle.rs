@@ -1,14 +1,14 @@
 use bevy::prelude::*;
 
 use crate::{
-    resources::ResourceStock,
+    resources::{HOUSE_FOOD_CAPACITY, Inventory, PublicInventory, STORAGE_CAPACITY},
     types::{BuildingKind, ResourceKind},
     world::GameAssets,
 };
 
 use super::{
     Blueprint, BuildingEntrance, BuildingVisual, CompletedBuilding, EntranceMarker,
-    EntrancePreview, Footprint,
+    EntrancePreview, Footprint, Housing,
 };
 
 pub(super) const ENTRANCE_MARKER_SCALE: Vec3 = Vec3::new(0.42, 0.08, 0.42);
@@ -31,7 +31,6 @@ pub fn update_blueprint_visuals(
 pub fn finish_blueprints(
     mut commands: Commands,
     assets: Option<Res<GameAssets>>,
-    mut stock: ResMut<ResourceStock>,
     blueprint_query: Query<(Entity, &Blueprint, Option<&Footprint>)>,
     mut visuals: Query<(&BuildingVisual, &mut MeshMaterial3d<StandardMaterial>)>,
 ) {
@@ -50,15 +49,25 @@ pub fn finish_blueprints(
                 break;
             }
         }
-        if blueprint.kind == BuildingKind::Storage {
-            stock.add(ResourceKind::Wood, 4);
-        }
-
         let mut entity_commands = commands.entity(entity);
         entity_commands.remove::<Blueprint>();
         entity_commands.insert(CompletedBuilding {
             kind: blueprint.kind,
         });
+        match blueprint.kind {
+            BuildingKind::House => {
+                entity_commands.insert((
+                    Inventory::home_food(HOUSE_FOOD_CAPACITY),
+                    Housing::default(),
+                ));
+            }
+            BuildingKind::Storage => {
+                let mut inventory = Inventory::public(STORAGE_CAPACITY);
+                inventory.add(ResourceKind::Wood, 4);
+                entity_commands.insert((inventory, PublicInventory));
+            }
+            BuildingKind::Woodcutter | BuildingKind::Gatherer | BuildingKind::Road => {}
+        }
         if let Some(footprint) = footprint {
             entity_commands.insert(Footprint {
                 polygon: footprint.polygon.clone(),

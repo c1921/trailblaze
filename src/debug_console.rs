@@ -3,7 +3,7 @@ use bevy::prelude::*;
 use crate::{
     building::Blueprint,
     colonist::{Colonist, ColonistState},
-    resources::ResourceStock,
+    resources::{COLONIST_CARRY_CAPACITY, CentralStorage, Inventory, PublicInventory},
     selection::{SelectedTarget, SelectionState},
     types::ResourceKind,
     ui,
@@ -82,13 +82,11 @@ fn spawn_debug_console(mut commands: Commands) {
 
             // Row 1: Colonists
             parent
-                .spawn((
-                    Node {
-                        display: Display::Flex,
-                        column_gap: Val::Px(8.0),
-                        ..default()
-                    },
-                ))
+                .spawn((Node {
+                    display: Display::Flex,
+                    column_gap: Val::Px(8.0),
+                    ..default()
+                },))
                 .with_children(|row| {
                     row.spawn(ui::utility_button("+1 Colonist", DebugButton::AddColonist));
                     row.spawn(ui::utility_button(
@@ -99,13 +97,11 @@ fn spawn_debug_console(mut commands: Commands) {
 
             // Row 2: Wood
             parent
-                .spawn((
-                    Node {
-                        display: Display::Flex,
-                        column_gap: Val::Px(8.0),
-                        ..default()
-                    },
-                ))
+                .spawn((Node {
+                    display: Display::Flex,
+                    column_gap: Val::Px(8.0),
+                    ..default()
+                },))
                 .with_children(|row| {
                     row.spawn(ui::utility_button("+100 Wood", DebugButton::AddWood100));
                     row.spawn(ui::utility_button("+1000 Wood", DebugButton::AddWood1000));
@@ -113,13 +109,11 @@ fn spawn_debug_console(mut commands: Commands) {
 
             // Row 3: Food
             parent
-                .spawn((
-                    Node {
-                        display: Display::Flex,
-                        column_gap: Val::Px(8.0),
-                        ..default()
-                    },
-                ))
+                .spawn((Node {
+                    display: Display::Flex,
+                    column_gap: Val::Px(8.0),
+                    ..default()
+                },))
                 .with_children(|row| {
                     row.spawn(ui::utility_button("+100 Food", DebugButton::AddFood100));
                     row.spawn(ui::utility_button("+1000 Food", DebugButton::AddFood1000));
@@ -127,15 +121,16 @@ fn spawn_debug_console(mut commands: Commands) {
 
             // Row 4: Building
             parent
-                .spawn((
-                    Node {
-                        display: Display::Flex,
-                        column_gap: Val::Px(8.0),
-                        ..default()
-                    },
-                ))
+                .spawn((Node {
+                    display: Display::Flex,
+                    column_gap: Val::Px(8.0),
+                    ..default()
+                },))
                 .with_children(|row| {
-                    row.spawn(ui::utility_button("Finish All", DebugButton::InstantFinishAll));
+                    row.spawn(ui::utility_button(
+                        "Finish All",
+                        DebugButton::InstantFinishAll,
+                    ));
                     row.spawn(ui::utility_button(
                         "Finish Selected",
                         DebugButton::InstantFinishSelected,
@@ -160,10 +155,7 @@ fn spawn_debug_console(mut commands: Commands) {
         });
 }
 
-fn toggle_debug_console(
-    keyboard: Res<ButtonInput<KeyCode>>,
-    mut state: ResMut<DebugConsoleState>,
-) {
+fn toggle_debug_console(keyboard: Res<ButtonInput<KeyCode>>, mut state: ResMut<DebugConsoleState>) {
     if keyboard.just_pressed(KeyCode::Backquote) {
         state.visible = !state.visible;
     }
@@ -185,11 +177,12 @@ fn update_debug_visibility(
 fn handle_debug_buttons(
     mut commands: Commands,
     mut debug_state: ResMut<DebugConsoleState>,
-    mut stock: ResMut<ResourceStock>,
     assets: Res<GameAssets>,
     selection: Res<SelectionState>,
     colonists: Query<&Colonist>,
     mut blueprints: Query<&mut Blueprint>,
+    mut central_inventories: Query<&mut Inventory, With<CentralStorage>>,
+    mut public_inventories: Query<&mut Inventory, (With<PublicInventory>, Without<CentralStorage>)>,
     mut buttons: Query<
         (&Interaction, &DebugButton, &mut BackgroundColor),
         (Changed<Interaction>, With<Button>),
@@ -207,10 +200,30 @@ fn handle_debug_buttons(
                         let count = colonists.iter().count() as u32;
                         spawn_debug_colonists(&mut commands, &assets, 5, count);
                     }
-                    DebugButton::AddWood100 => stock.add(ResourceKind::Wood, 100),
-                    DebugButton::AddWood1000 => stock.add(ResourceKind::Wood, 1000),
-                    DebugButton::AddFood100 => stock.add(ResourceKind::Food, 100),
-                    DebugButton::AddFood1000 => stock.add(ResourceKind::Food, 1000),
+                    DebugButton::AddWood100 => add_debug_resource(
+                        &mut central_inventories,
+                        &mut public_inventories,
+                        ResourceKind::Wood,
+                        100,
+                    ),
+                    DebugButton::AddWood1000 => add_debug_resource(
+                        &mut central_inventories,
+                        &mut public_inventories,
+                        ResourceKind::Wood,
+                        1000,
+                    ),
+                    DebugButton::AddFood100 => add_debug_resource(
+                        &mut central_inventories,
+                        &mut public_inventories,
+                        ResourceKind::Food,
+                        100,
+                    ),
+                    DebugButton::AddFood1000 => add_debug_resource(
+                        &mut central_inventories,
+                        &mut public_inventories,
+                        ResourceKind::Food,
+                        1000,
+                    ),
                     DebugButton::InstantFinishAll => {
                         for mut bp in &mut blueprints {
                             bp.delivered_wood = bp.required_wood;
@@ -237,10 +250,32 @@ fn handle_debug_buttons(
     }
 }
 
-fn fast_build_blueprints(
-    state: Res<DebugConsoleState>,
-    mut blueprints: Query<&mut Blueprint>,
+fn add_debug_resource(
+    central_inventories: &mut Query<&mut Inventory, With<CentralStorage>>,
+    public_inventories: &mut Query<
+        &mut Inventory,
+        (With<PublicInventory>, Without<CentralStorage>),
+    >,
+    kind: ResourceKind,
+    amount: i32,
 ) {
+    let mut remaining = amount;
+    for mut inventory in central_inventories.iter_mut() {
+        remaining -= inventory.add_partial(kind, remaining);
+        if remaining <= 0 {
+            return;
+        }
+    }
+
+    for mut inventory in public_inventories.iter_mut() {
+        remaining -= inventory.add_partial(kind, remaining);
+        if remaining <= 0 {
+            return;
+        }
+    }
+}
+
+fn fast_build_blueprints(state: Res<DebugConsoleState>, mut blueprints: Query<&mut Blueprint>) {
     if !state.fast_build {
         return;
     }
@@ -282,6 +317,9 @@ fn spawn_debug_colonists(
                 state: ColonistState::Idle,
                 speed: 2.2,
                 path_rebuild_timer: 0.0,
+                home: None,
+                satiety: 100.0,
+                carry_capacity: COLONIST_CARRY_CAPACITY,
             },
         ));
     }

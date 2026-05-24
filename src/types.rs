@@ -18,6 +18,13 @@ impl ResourceKind {
             Self::Food => "Food",
         }
     }
+
+    pub fn unit_size(self) -> i32 {
+        match self {
+            Self::Wood => 10,
+            Self::Food => 1,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
@@ -56,7 +63,7 @@ impl BuildingKind {
                 wood_cost: 10,
                 build_seconds: 5.0,
                 height: 1.1,
-                population_capacity: 4,
+                population_capacity: 5,
             },
             Self::Storage => BuildingDefinition {
                 label: "Storage",
