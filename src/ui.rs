@@ -20,8 +20,56 @@ pub struct UiPlugin;
 
 impl Plugin for UiPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_ui.after(crate::world::setup_scene))
-            .add_systems(Update, (handle_ui_buttons, update_ui_text));
+        app.init_resource::<UiVisibility>()
+            .add_systems(Startup, spawn_ui.after(crate::world::setup_scene))
+            .add_systems(
+                Update,
+                (
+                    toggle_ui_visibility,
+                    update_ui_visibility,
+                    handle_ui_buttons,
+                    update_ui_text,
+                ),
+            );
+    }
+}
+
+#[derive(Resource)]
+pub struct UiVisibility {
+    pub visible: bool,
+}
+
+impl Default for UiVisibility {
+    fn default() -> Self {
+        Self { visible: true }
+    }
+}
+
+#[derive(Component)]
+struct UiRoot;
+
+fn toggle_ui_visibility(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mut visibility: ResMut<UiVisibility>,
+) {
+    if keyboard.just_pressed(KeyCode::F1) {
+        visibility.visible = !visibility.visible;
+    }
+}
+
+fn update_ui_visibility(
+    visibility: Res<UiVisibility>,
+    mut panels: Query<&mut Node, With<UiRoot>>,
+) {
+    if !visibility.is_changed() {
+        return;
+    }
+    for mut node in &mut panels {
+        node.display = if visibility.visible {
+            Display::Flex
+        } else {
+            Display::None
+        };
     }
 }
 
@@ -57,6 +105,7 @@ pub struct FpsText;
 
 pub fn spawn_ui(mut commands: Commands) {
     commands.spawn((
+        UiRoot,
         Node {
             position_type: PositionType::Absolute,
             left: px(12),
@@ -90,6 +139,7 @@ pub fn spawn_ui(mut commands: Commands) {
     ));
 
     commands.spawn((
+        UiRoot,
         Node {
             position_type: PositionType::Absolute,
             left: px(12),
@@ -110,6 +160,7 @@ pub fn spawn_ui(mut commands: Commands) {
     ));
 
     commands.spawn((
+        UiRoot,
         Node {
             position_type: PositionType::Absolute,
             right: px(12),
@@ -138,6 +189,7 @@ pub fn spawn_ui(mut commands: Commands) {
     ));
 
     commands.spawn((
+        UiRoot,
         Node {
             position_type: PositionType::Absolute,
             left: px(12),
