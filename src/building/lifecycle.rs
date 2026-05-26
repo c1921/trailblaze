@@ -1,8 +1,11 @@
 use bevy::{light::NotShadowCaster, prelude::*};
 
 use crate::{
-    farm::{CompletedFarmPlot, FarmPlot, FarmVisual, farm_overlay_mesh},
+    farm::{
+        CompletedFarmPlot, FarmCrop, FarmPlot, FarmVisual, farm_crop_positions, farm_overlay_mesh,
+    },
     resources::{HOUSE_FOOD_CAPACITY, Inventory, PublicInventory, STORAGE_CAPACITY},
+    terrain::TerrainSeed,
     types::{BuildingKind, ConstructionKind, ResourceKind},
     world::GameAssets,
 };
@@ -35,6 +38,7 @@ pub fn update_blueprint_visuals(
 pub fn finish_blueprints(
     mut commands: Commands,
     assets: Option<Res<GameAssets>>,
+    terrain_seed: Res<TerrainSeed>,
     blueprint_query: Query<(Entity, &Blueprint, Option<&Footprint>, Option<&FarmPlot>)>,
     mut visuals: Query<
         (&BuildingVisual, &mut MeshMaterial3d<StandardMaterial>),
@@ -54,8 +58,8 @@ pub fn finish_blueprints(
             continue;
         }
 
-        let mut entity_commands = commands.entity(entity);
-        entity_commands.remove::<Blueprint>();
+        commands.entity(entity).remove::<Blueprint>();
+        let mut completed_farm_polygon = None;
 
         match blueprint.kind {
             ConstructionKind::Building(kind) => {
@@ -65,10 +69,10 @@ pub fn finish_blueprints(
                         break;
                     }
                 }
-                entity_commands.insert(CompletedBuilding { kind });
+                commands.entity(entity).insert(CompletedBuilding { kind });
                 match kind {
                     BuildingKind::House => {
-                        entity_commands.insert((
+                        commands.entity(entity).insert((
                             Inventory::home_food(HOUSE_FOOD_CAPACITY),
                             Housing::default(),
                         ));
@@ -76,7 +80,7 @@ pub fn finish_blueprints(
                     BuildingKind::Storage => {
                         let mut inventory = Inventory::public(STORAGE_CAPACITY);
                         inventory.add(ResourceKind::Wood, 4);
-                        entity_commands.insert((inventory, PublicInventory));
+                        commands.entity(entity).insert((inventory, PublicInventory));
                     }
                     BuildingKind::Woodcutter | BuildingKind::Gatherer | BuildingKind::Road => {}
                 }
@@ -88,16 +92,22 @@ pub fn finish_blueprints(
                         break;
                     }
                 }
-                entity_commands.insert(CompletedFarmPlot {
+                commands.entity(entity).insert(CompletedFarmPlot {
                     area_cells: farm_plot.map(|plot| plot.area_cells).unwrap_or(0.0),
                 });
+                if let Some(footprint) = footprint {
+                    completed_farm_polygon = Some(footprint.polygon.clone());
+                }
             }
         }
         if let Some(footprint) = footprint {
-            entity_commands.insert(Footprint {
+            commands.entity(entity).insert(Footprint {
                 polygon: footprint.polygon.clone(),
                 passable: footprint.passable,
             });
+        }
+        if let Some(polygon) = completed_farm_polygon {
+            spawn_farm_crops(&mut commands, &assets, entity, terrain_seed.0, &polygon);
         }
     }
 }
@@ -178,6 +188,26 @@ pub(super) fn sync_farm_visual(
         ChildOf(owner),
         NotShadowCaster,
     ));
+}
+
+fn spawn_farm_crops(
+    commands: &mut Commands,
+    assets: &GameAssets,
+    owner: Entity,
+    seed: u64,
+    polygon: &[Vec2],
+) {
+    let origin = crate::farm::farm_origin(seed, polygon);
+    for translation in farm_crop_positions(seed, polygon, origin) {
+        commands.spawn((
+            Mesh3d(assets.crop_mesh.clone()),
+            MeshMaterial3d(assets.crop_material.clone()),
+            Transform::from_translation(translation),
+            FarmCrop { owner },
+            ChildOf(owner),
+            NotShadowCaster,
+        ));
+    }
 }
 
 pub(super) fn despawn_building_visual(
@@ -282,6 +312,7 @@ pub(super) fn visual_translation(height: f32) -> Vec3 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::terrain::{DEFAULT_TERRAIN_SEED, TerrainSeed};
 
     fn test_assets() -> GameAssets {
         let mut materials = Assets::<StandardMaterial>::default();
@@ -298,6 +329,8 @@ mod tests {
             entrance_material: materials.add(Color::srgb(1.0, 0.9, 0.2)),
             farm_blueprint_material: materials.add(Color::srgba(0.4, 0.25, 0.12, 0.7)),
             farm_soil_material: materials.add(Color::srgba(0.3, 0.2, 0.1, 0.9)),
+            crop_mesh: Handle::default(),
+            crop_material: materials.add(Color::srgb(0.34, 0.67, 0.24)),
             colonist_mesh: Handle::default(),
             colonist_material: materials.add(Color::srgb(0.9, 0.7, 0.4)),
         }
@@ -310,6 +343,7 @@ mod tests {
         let blueprint_material = assets.farm_blueprint_material.clone();
         let soil_material = assets.farm_soil_material.clone();
         app.insert_resource(assets);
+        app.insert_resource(TerrainSeed(DEFAULT_TERRAIN_SEED));
         app.add_systems(Update, finish_blueprints);
 
         let farm = app
@@ -354,5 +388,59 @@ mod tests {
             .map(|(_, material)| material.0.clone())
             .unwrap();
         assert_eq!(material, soil_material);
+    }
+
+    #[test]
+    fn finish_blueprints_spawns_farm_crop_children() {
+        let mut app = App::new();
+        app.insert_resource(test_assets());
+        app.insert_resource(TerrainSeed(DEFAULT_TERRAIN_SEED));
+        app.add_systems(Update, finish_blueprints);
+
+        let polygon = vec![
+            Vec2::new(20.0, 20.0),
+            Vec2::new(23.0, 20.0),
+            Vec2::new(23.0, 23.0),
+            Vec2::new(20.0, 23.0),
+        ];
+        let farm = app
+            .world_mut()
+            .spawn((
+                Transform::from_translation(crate::farm::farm_origin(
+                    DEFAULT_TERRAIN_SEED,
+                    &polygon,
+                )),
+                Visibility::Visible,
+                Blueprint {
+                    kind: ConstructionKind::Farm,
+                    required_wood: 0,
+                    delivered_wood: 0,
+                    progress: 1.0,
+                    build_seconds: 1.0,
+                },
+                Footprint {
+                    polygon: polygon.clone(),
+                    passable: false,
+                },
+                FarmPlot { area_cells: 9.0 },
+            ))
+            .id();
+        app.world_mut().spawn((
+            FarmVisual { owner: farm },
+            MeshMaterial3d::<StandardMaterial>(Handle::default()),
+        ));
+
+        app.update();
+
+        let mut crops = app.world_mut().query::<(&FarmCrop, &ChildOf)>();
+        let crop_count = crops
+            .iter(app.world())
+            .inspect(|(crop, child_of)| {
+                assert_eq!(crop.owner, farm);
+                assert_eq!(child_of.parent(), farm);
+            })
+            .count();
+
+        assert!(crop_count > 0);
     }
 }

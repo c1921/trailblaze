@@ -2,7 +2,7 @@ use bevy::prelude::*;
 
 use crate::{
     building::{
-        PlacementIssue, WorldGeometry, is_convex_polygon, polygon_area,
+        PlacementIssue, WorldGeometry, is_convex_polygon, point_in_polygon, polygon_area,
         polygon_has_self_intersection, signed_polygon_area,
     },
     math::within_world_bounds,
@@ -15,6 +15,11 @@ pub const FARM_ACCESS_OFFSET: f32 = CELL_SIZE * 0.75;
 pub const FARM_OVERLAY_SAMPLE_STEP: f32 = CELL_SIZE * 0.35;
 pub const FARM_OVERLAY_EDGE_FEATHER: f32 = CELL_SIZE * 0.18;
 pub const FARM_OVERLAY_Y_OFFSET: f32 = 0.025;
+pub const CROP_HEIGHT: f32 = 0.62;
+pub const CROP_RADIUS: f32 = 0.055;
+pub const CROP_GRID_SPACING: f32 = CELL_SIZE * 0.55;
+pub const CROP_EDGE_PADDING: f32 = CELL_SIZE * 0.18;
+pub const CROP_Y_OFFSET: f32 = 0.03;
 
 #[derive(Component, Debug)]
 pub struct FarmPlot {
@@ -28,6 +33,11 @@ pub struct CompletedFarmPlot {
 
 #[derive(Component, Debug)]
 pub struct FarmVisual {
+    pub owner: Entity,
+}
+
+#[derive(Component, Debug)]
+pub struct FarmCrop {
     pub owner: Entity,
 }
 
@@ -154,6 +164,39 @@ pub fn farm_overlay_mesh(seed: u64, polygon: &[Vec2], origin: Vec3) -> Mesh {
     .with_inserted_indices(bevy::mesh::Indices::U32(indices))
 }
 
+pub fn farm_crop_positions(seed: u64, polygon: &[Vec2], origin: Vec3) -> Vec<Vec3> {
+    if polygon.len() < 3 {
+        return Vec::new();
+    }
+
+    let Some((min, max)) = polygon_bounds(polygon) else {
+        return Vec::new();
+    };
+    let mut positions = Vec::new();
+    let mut z = aligned_grid_start(min.y, CROP_GRID_SPACING);
+
+    while z <= max.y {
+        let mut x = aligned_grid_start(min.x, CROP_GRID_SPACING);
+        while x <= max.x {
+            let point = Vec2::new(x, z);
+            if point_in_polygon(point, polygon)
+                && distance_to_polygon_edge(point, polygon) >= CROP_EDGE_PADDING
+            {
+                let height = terrain_height(seed, x, z);
+                positions.push(Vec3::new(
+                    x - origin.x,
+                    height - origin.y + CROP_Y_OFFSET + CROP_HEIGHT * 0.5,
+                    z - origin.z,
+                ));
+            }
+            x += CROP_GRID_SPACING;
+        }
+        z += CROP_GRID_SPACING;
+    }
+
+    positions
+}
+
 pub fn polygon_centroid(polygon: &[Vec2]) -> Vec2 {
     if polygon.is_empty() {
         return Vec2::ZERO;
@@ -164,6 +207,23 @@ pub fn polygon_centroid(polygon: &[Vec2]) -> Vec2 {
         .copied()
         .fold(Vec2::ZERO, |sum, point| sum + point)
         / polygon.len() as f32
+}
+
+fn polygon_bounds(polygon: &[Vec2]) -> Option<(Vec2, Vec2)> {
+    let first = *polygon.first()?;
+    let mut min = first;
+    let mut max = first;
+
+    for point in polygon.iter().skip(1) {
+        min = min.min(*point);
+        max = max.max(*point);
+    }
+
+    Some((min, max))
+}
+
+fn aligned_grid_start(value: f32, spacing: f32) -> f32 {
+    (value / spacing).ceil() * spacing
 }
 
 fn append_overlay_triangle(
@@ -491,5 +551,35 @@ mod tests {
 
         assert!(min_alpha <= 0.01, "edge alpha was {min_alpha}");
         assert!(max_alpha >= 0.99, "interior alpha was {max_alpha}");
+    }
+
+    #[test]
+    fn farm_crop_positions_stay_inside_polygon_with_edge_padding() {
+        let polygon = vec![
+            Vec2::new(20.0, 20.0),
+            Vec2::new(23.0, 20.0),
+            Vec2::new(23.0, 23.0),
+            Vec2::new(20.0, 23.0),
+        ];
+        let origin = farm_origin(SEED, &polygon);
+        let positions = farm_crop_positions(SEED, &polygon, origin);
+
+        assert!(!positions.is_empty());
+        for position in positions {
+            assert!(position.is_finite());
+
+            let point = Vec2::new(position.x + origin.x, position.z + origin.z);
+            assert!(point_in_polygon(point, &polygon));
+            assert!(distance_to_polygon_edge(point, &polygon) >= CROP_EDGE_PADDING - 0.0001);
+
+            let expected_y = terrain_height(SEED, point.x, point.y) - origin.y
+                + CROP_Y_OFFSET
+                + CROP_HEIGHT * 0.5;
+            assert!(
+                (position.y - expected_y).abs() < 0.0001,
+                "expected crop y {expected_y}, got {}",
+                position.y
+            );
+        }
     }
 }

@@ -1,4 +1,4 @@
-use bevy::{light::NotShadowCaster, prelude::*};
+use bevy::{light::NotShadowCaster, mesh::Meshable, prelude::*};
 
 #[derive(Component)]
 pub struct MainLight;
@@ -52,6 +52,8 @@ pub struct GameAssets {
     pub entrance_material: Handle<StandardMaterial>,
     pub farm_blueprint_material: Handle<StandardMaterial>,
     pub farm_soil_material: Handle<StandardMaterial>,
+    pub crop_mesh: Handle<Mesh>,
+    pub crop_material: Handle<StandardMaterial>,
     pub colonist_mesh: Handle<Mesh>,
     pub colonist_material: Handle<StandardMaterial>,
 }
@@ -78,10 +80,20 @@ pub fn setup_scene(
 ) {
     let cube_mesh = meshes.add(Cuboid::from_length(1.0));
     let colonist_mesh = meshes.add(Cuboid::new(0.32, 0.64, 0.32));
+    let crop_mesh = meshes.add(
+        Cylinder::new(crate::farm::CROP_RADIUS, crate::farm::CROP_HEIGHT)
+            .mesh()
+            .resolution(8),
+    );
 
     let tree_material = materials.add(Color::srgb(0.16, 0.38, 0.16));
     let food_material = materials.add(Color::srgb(0.66, 0.12, 0.18));
     let colonist_material = materials.add(Color::srgb(0.92, 0.72, 0.45));
+    let crop_material = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.34, 0.67, 0.24),
+        perceptual_roughness: 0.95,
+        ..default()
+    });
     let terrain_material = materials.add(StandardMaterial {
         base_color: Color::WHITE,
         perceptual_roughness: 0.9,
@@ -128,6 +140,8 @@ pub fn setup_scene(
         entrance_material: materials.add(Color::srgb(0.95, 0.86, 0.28)),
         farm_blueprint_material,
         farm_soil_material,
+        crop_mesh: crop_mesh.clone(),
+        crop_material,
         colonist_mesh: colonist_mesh.clone(),
         colonist_material: colonist_material.clone(),
     };
