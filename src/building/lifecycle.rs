@@ -1,7 +1,7 @@
-use bevy::prelude::*;
+use bevy::{light::NotShadowCaster, prelude::*};
 
 use crate::{
-    farm::{CompletedFarmPlot, FarmPlot, FarmVisual, farm_surface_mesh},
+    farm::{CompletedFarmPlot, FarmPlot, FarmVisual, farm_overlay_mesh},
     resources::{HOUSE_FOOD_CAPACITY, Inventory, PublicInventory, STORAGE_CAPACITY},
     types::{BuildingKind, ConstructionKind, ResourceKind},
     world::GameAssets,
@@ -36,8 +36,14 @@ pub fn finish_blueprints(
     mut commands: Commands,
     assets: Option<Res<GameAssets>>,
     blueprint_query: Query<(Entity, &Blueprint, Option<&Footprint>, Option<&FarmPlot>)>,
-    mut visuals: Query<(&BuildingVisual, &mut MeshMaterial3d<StandardMaterial>), Without<FarmVisual>>,
-    mut farm_visuals: Query<(&FarmVisual, &mut MeshMaterial3d<StandardMaterial>), Without<BuildingVisual>>,
+    mut visuals: Query<
+        (&BuildingVisual, &mut MeshMaterial3d<StandardMaterial>),
+        Without<FarmVisual>,
+    >,
+    mut farm_visuals: Query<
+        (&FarmVisual, &mut MeshMaterial3d<StandardMaterial>),
+        Without<BuildingVisual>,
+    >,
 ) {
     let Some(assets) = assets else {
         return;
@@ -114,12 +120,15 @@ pub(super) fn sync_building_visual(
     material: Handle<StandardMaterial>,
     scale: Vec3,
     height: f32,
-    visuals: &mut Query<(
-        Entity,
-        &BuildingVisual,
-        &mut Transform,
-        &mut MeshMaterial3d<StandardMaterial>,
-    ), Without<FarmVisual>>,
+    visuals: &mut Query<
+        (
+            Entity,
+            &BuildingVisual,
+            &mut Transform,
+            &mut MeshMaterial3d<StandardMaterial>,
+        ),
+        Without<FarmVisual>,
+    >,
 ) {
     for (_, visual, mut transform, mut visual_material) in visuals.iter_mut() {
         if visual.owner == owner {
@@ -140,15 +149,18 @@ pub(super) fn sync_farm_visual(
     seed: u64,
     polygon: &[Vec2],
     material: Handle<StandardMaterial>,
-    visuals: &mut Query<(
-        Entity,
-        &FarmVisual,
-        &mut Mesh3d,
-        &mut MeshMaterial3d<StandardMaterial>,
-    ), Without<BuildingVisual>>,
+    visuals: &mut Query<
+        (
+            Entity,
+            &FarmVisual,
+            &mut Mesh3d,
+            &mut MeshMaterial3d<StandardMaterial>,
+        ),
+        Without<BuildingVisual>,
+    >,
 ) {
     let origin = crate::farm::farm_origin(seed, polygon);
-    let mesh = meshes.add(farm_surface_mesh(seed, polygon, origin));
+    let mesh = meshes.add(farm_overlay_mesh(seed, polygon, origin));
     for (_, visual, mut mesh_handle, mut visual_material) in visuals.iter_mut() {
         if visual.owner == owner {
             mesh_handle.0 = mesh;
@@ -164,18 +176,22 @@ pub(super) fn sync_farm_visual(
         Visibility::Visible,
         FarmVisual { owner },
         ChildOf(owner),
+        NotShadowCaster,
     ));
 }
 
 pub(super) fn despawn_building_visual(
     commands: &mut Commands,
     owner: Entity,
-    visuals: &mut Query<(
-        Entity,
-        &BuildingVisual,
-        &mut Transform,
-        &mut MeshMaterial3d<StandardMaterial>,
-    ), Without<FarmVisual>>,
+    visuals: &mut Query<
+        (
+            Entity,
+            &BuildingVisual,
+            &mut Transform,
+            &mut MeshMaterial3d<StandardMaterial>,
+        ),
+        Without<FarmVisual>,
+    >,
 ) {
     for (entity, visual, _, _) in visuals.iter_mut() {
         if visual.owner == owner {
@@ -187,12 +203,15 @@ pub(super) fn despawn_building_visual(
 pub(super) fn despawn_farm_visual(
     commands: &mut Commands,
     owner: Entity,
-    visuals: &mut Query<(
-        Entity,
-        &FarmVisual,
-        &mut Mesh3d,
-        &mut MeshMaterial3d<StandardMaterial>,
-    ), Without<BuildingVisual>>,
+    visuals: &mut Query<
+        (
+            Entity,
+            &FarmVisual,
+            &mut Mesh3d,
+            &mut MeshMaterial3d<StandardMaterial>,
+        ),
+        Without<BuildingVisual>,
+    >,
 ) {
     for (entity, visual, _, _) in visuals.iter_mut() {
         if visual.owner == owner {
@@ -258,4 +277,82 @@ pub(super) fn entrance_marker_translation(local_offset: Vec3) -> Vec3 {
 
 pub(super) fn visual_translation(height: f32) -> Vec3 {
     Vec3::new(0.0, height * 0.5, 0.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_assets() -> GameAssets {
+        let mut materials = Assets::<StandardMaterial>::default();
+        GameAssets {
+            cube_mesh: Handle::default(),
+            preview_valid_material: materials.add(Color::srgb(0.0, 1.0, 0.0)),
+            preview_invalid_material: materials.add(Color::srgb(1.0, 0.0, 0.0)),
+            blueprint_material: materials.add(Color::srgb(0.0, 0.0, 1.0)),
+            house_material: materials.add(Color::srgb(0.7, 0.3, 0.2)),
+            storage_material: materials.add(Color::srgb(0.7, 0.6, 0.3)),
+            woodcutter_material: materials.add(Color::srgb(0.3, 0.6, 0.2)),
+            gatherer_material: materials.add(Color::srgb(0.5, 0.4, 0.7)),
+            road_material: materials.add(Color::srgb(0.2, 0.2, 0.2)),
+            entrance_material: materials.add(Color::srgb(1.0, 0.9, 0.2)),
+            farm_blueprint_material: materials.add(Color::srgba(0.4, 0.25, 0.12, 0.7)),
+            farm_soil_material: materials.add(Color::srgba(0.3, 0.2, 0.1, 0.9)),
+            colonist_mesh: Handle::default(),
+            colonist_material: materials.add(Color::srgb(0.9, 0.7, 0.4)),
+        }
+    }
+
+    #[test]
+    fn finish_blueprints_switches_farm_visual_material() {
+        let mut app = App::new();
+        let assets = test_assets();
+        let blueprint_material = assets.farm_blueprint_material.clone();
+        let soil_material = assets.farm_soil_material.clone();
+        app.insert_resource(assets);
+        app.add_systems(Update, finish_blueprints);
+
+        let farm = app
+            .world_mut()
+            .spawn((
+                Blueprint {
+                    kind: ConstructionKind::Farm,
+                    required_wood: 0,
+                    delivered_wood: 0,
+                    progress: 1.0,
+                    build_seconds: 1.0,
+                },
+                Footprint {
+                    polygon: vec![
+                        Vec2::new(0.0, 0.0),
+                        Vec2::new(1.0, 0.0),
+                        Vec2::new(1.0, 1.0),
+                        Vec2::new(0.0, 1.0),
+                    ],
+                    passable: false,
+                },
+                FarmPlot { area_cells: 1.0 },
+            ))
+            .id();
+        app.world_mut().spawn((
+            FarmVisual { owner: farm },
+            MeshMaterial3d(blueprint_material),
+        ));
+
+        app.update();
+
+        let farm_entity = app.world().entity(farm);
+        assert!(farm_entity.get::<CompletedFarmPlot>().is_some());
+        assert!(farm_entity.get::<Blueprint>().is_none());
+
+        let mut query = app
+            .world_mut()
+            .query::<(&FarmVisual, &MeshMaterial3d<StandardMaterial>)>();
+        let material = query
+            .iter(app.world())
+            .find(|(visual, _)| visual.owner == farm)
+            .map(|(_, material)| material.0.clone())
+            .unwrap();
+        assert_eq!(material, soil_material);
+    }
 }

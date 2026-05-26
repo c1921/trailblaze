@@ -38,18 +38,24 @@ pub fn update_build_preview(
         (Entity, &mut Transform, &mut Visibility),
         (With<BuildPreview>, Without<BuildingVisual>),
     >,
-    mut visual_query: Query<(
-        Entity,
-        &BuildingVisual,
-        &mut Transform,
-        &mut MeshMaterial3d<StandardMaterial>,
-    ), Without<FarmVisual>>,
-    mut farm_visual_query: Query<(
-        Entity,
-        &FarmVisual,
-        &mut Mesh3d,
-        &mut MeshMaterial3d<StandardMaterial>,
-    ), Without<BuildingVisual>>,
+    mut visual_query: Query<
+        (
+            Entity,
+            &BuildingVisual,
+            &mut Transform,
+            &mut MeshMaterial3d<StandardMaterial>,
+        ),
+        Without<FarmVisual>,
+    >,
+    mut farm_visual_query: Query<
+        (
+            Entity,
+            &FarmVisual,
+            &mut Mesh3d,
+            &mut MeshMaterial3d<StandardMaterial>,
+        ),
+        Without<BuildingVisual>,
+    >,
 ) {
     let Some(assets) = assets else {
         return;
@@ -216,12 +222,15 @@ pub fn place_blueprint(
     terrain_config: Res<TerrainGenerationConfig>,
     mut geometry: ResMut<WorldGeometry>,
     mut build_state: ResMut<BuildState>,
-    mut farm_visual_query: Query<(
-        Entity,
-        &FarmVisual,
-        &mut Mesh3d,
-        &mut MeshMaterial3d<StandardMaterial>,
-    ), Without<BuildingVisual>>,
+    mut farm_visual_query: Query<
+        (
+            Entity,
+            &FarmVisual,
+            &mut Mesh3d,
+            &mut MeshMaterial3d<StandardMaterial>,
+        ),
+        Without<BuildingVisual>,
+    >,
 ) {
     let Some(assets) = assets else {
         return;
@@ -345,18 +354,24 @@ fn update_farm_preview(
         (Entity, &mut Transform, &mut Visibility),
         (With<BuildPreview>, Without<BuildingVisual>),
     >,
-    building_visuals: &mut Query<(
-        Entity,
-        &BuildingVisual,
-        &mut Transform,
-        &mut MeshMaterial3d<StandardMaterial>,
-    ), Without<FarmVisual>>,
-    farm_visuals: &mut Query<(
-        Entity,
-        &FarmVisual,
-        &mut Mesh3d,
-        &mut MeshMaterial3d<StandardMaterial>,
-    ), Without<BuildingVisual>>,
+    building_visuals: &mut Query<
+        (
+            Entity,
+            &BuildingVisual,
+            &mut Transform,
+            &mut MeshMaterial3d<StandardMaterial>,
+        ),
+        Without<FarmVisual>,
+    >,
+    farm_visuals: &mut Query<
+        (
+            Entity,
+            &FarmVisual,
+            &mut Mesh3d,
+            &mut MeshMaterial3d<StandardMaterial>,
+        ),
+        Without<BuildingVisual>,
+    >,
 ) {
     hide_entrance_preview(commands, build_state);
 
@@ -430,12 +445,15 @@ fn handle_farm_clicks(
     max_slope: f32,
     geometry: &mut WorldGeometry,
     build_state: &mut BuildState,
-    farm_visuals: &mut Query<(
-        Entity,
-        &FarmVisual,
-        &mut Mesh3d,
-        &mut MeshMaterial3d<StandardMaterial>,
-    ), Without<BuildingVisual>>,
+    farm_visuals: &mut Query<
+        (
+            Entity,
+            &FarmVisual,
+            &mut Mesh3d,
+            &mut MeshMaterial3d<StandardMaterial>,
+        ),
+        Without<BuildingVisual>,
+    >,
 ) {
     let finish_key =
         keyboard.just_pressed(KeyCode::Enter) || keyboard.just_pressed(KeyCode::NumpadEnter);
@@ -511,12 +529,15 @@ fn place_farm_blueprint(
     max_slope: f32,
     geometry: &mut WorldGeometry,
     build_state: &mut BuildState,
-    farm_visuals: &mut Query<(
-        Entity,
-        &FarmVisual,
-        &mut Mesh3d,
-        &mut MeshMaterial3d<StandardMaterial>,
-    ), Without<BuildingVisual>>,
+    farm_visuals: &mut Query<
+        (
+            Entity,
+            &FarmVisual,
+            &mut Mesh3d,
+            &mut MeshMaterial3d<StandardMaterial>,
+        ),
+        Without<BuildingVisual>,
+    >,
 ) {
     let polygon = build_state.farm_points.clone();
     let access = farm_access_point(seed, &polygon);

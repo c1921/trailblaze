@@ -103,13 +103,14 @@ pub fn setup_scene(
         ..default()
     });
     let farm_blueprint_material = materials.add(StandardMaterial {
-        base_color: Color::srgba(0.42, 0.25, 0.12, 0.58),
+        base_color: Color::srgba(0.42, 0.25, 0.12, 0.7),
         alpha_mode: AlphaMode::Blend,
         perceptual_roughness: 0.95,
         ..default()
     });
     let farm_soil_material = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.34, 0.22, 0.12),
+        base_color: Color::srgba(0.34, 0.22, 0.12, 0.86),
+        alpha_mode: AlphaMode::Blend,
         perceptual_roughness: 0.95,
         ..default()
     });
@@ -337,11 +338,18 @@ fn terrain_normal(seed: u64, x: f32, z: f32) -> [f32; 3] {
 }
 
 fn terrain_vertex_color(seed: u64, x: f32, z: f32, height: f32) -> [f32; 4] {
-    let base = match terrain_kind_at(seed, x, z) {
+    shaded_terrain_color(terrain_base_color(seed, x, z), height)
+}
+
+fn terrain_base_color(seed: u64, x: f32, z: f32) -> [f32; 3] {
+    match terrain_kind_at(seed, x, z) {
         TerrainKind::Grass => [0.5, 0.57, 0.45],
         TerrainKind::ForestFloor => [0.23, 0.35, 0.22],
         TerrainKind::ForageField => [0.38, 0.5, 0.27],
-    };
+    }
+}
+
+fn shaded_terrain_color(base: [f32; 3], height: f32) -> [f32; 4] {
     let shade = (0.96 + height * 0.012).clamp(0.78, 1.12);
     [base[0] * shade, base[1] * shade, base[2] * shade, 1.0]
 }

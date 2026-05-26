@@ -12,7 +12,9 @@ use crate::{
 
 pub const FARM_CLOSE_DISTANCE: f32 = CELL_SIZE * 0.55;
 pub const FARM_ACCESS_OFFSET: f32 = CELL_SIZE * 0.75;
-pub const FARM_SURFACE_Y_OFFSET: f32 = 0.035;
+pub const FARM_OVERLAY_SAMPLE_STEP: f32 = CELL_SIZE * 0.35;
+pub const FARM_OVERLAY_EDGE_FEATHER: f32 = CELL_SIZE * 0.18;
+pub const FARM_OVERLAY_Y_OFFSET: f32 = 0.025;
 
 #[derive(Component, Debug)]
 pub struct FarmPlot {
@@ -105,41 +107,40 @@ pub fn farm_access_point(seed: u64, polygon: &[Vec2]) -> Option<Vec3> {
         .map(|point| Vec3::new(point.x, terrain_height(seed, point.x, point.y), point.y))
 }
 
-pub fn farm_surface_mesh(seed: u64, polygon: &[Vec2], origin: Vec3) -> Mesh {
-    let mut positions = Vec::with_capacity(polygon.len() + 1);
-    let mut normals = Vec::with_capacity(polygon.len() + 1);
-    let mut uvs = Vec::with_capacity(polygon.len() + 1);
-    let mut indices = Vec::with_capacity(polygon.len() * 3);
-
-    positions.push([0.0, FARM_SURFACE_Y_OFFSET, 0.0]);
-    normals.push([0.0, 1.0, 0.0]);
-    uvs.push([0.5, 0.5]);
-
-    let bounds = polygon_bounds(polygon);
-    let extent = (bounds.1 - bounds.0).max(Vec2::splat(0.001));
-    for point in polygon {
-        let height = terrain_height(seed, point.x, point.y);
-        positions.push([
-            point.x - origin.x,
-            height - origin.y + FARM_SURFACE_Y_OFFSET,
-            point.y - origin.z,
-        ]);
-        normals.push([0.0, 1.0, 0.0]);
-        uvs.push([
-            (point.x - bounds.0.x) / extent.x,
-            (point.y - bounds.0.y) / extent.y,
-        ]);
+pub fn farm_overlay_mesh(seed: u64, polygon: &[Vec2], origin: Vec3) -> Mesh {
+    let signed_area = signed_polygon_area(polygon);
+    if polygon.len() < 3 || signed_area.abs() <= 0.0001 {
+        return empty_overlay_mesh();
     }
 
-    let signed_area = signed_polygon_area(polygon);
+    let center = polygon_centroid(polygon);
+    let mut positions = Vec::new();
+    let mut normals = Vec::new();
+    let mut uvs = Vec::new();
+    let mut colors = Vec::new();
+    let mut indices = Vec::new();
+
     for index in 0..polygon.len() {
-        let current = index as u32 + 1;
-        let next = ((index + 1) % polygon.len()) as u32 + 1;
-        if signed_area > 0.0 {
-            indices.extend([0, next, current]);
+        let current = polygon[index];
+        let next = polygon[(index + 1) % polygon.len()];
+        let (edge_a, edge_b) = if signed_area > 0.0 {
+            (next, current)
         } else {
-            indices.extend([0, current, next]);
-        }
+            (current, next)
+        };
+        append_overlay_triangle(
+            seed,
+            polygon,
+            origin,
+            center,
+            edge_a,
+            edge_b,
+            &mut positions,
+            &mut normals,
+            &mut uvs,
+            &mut colors,
+            &mut indices,
+        );
     }
 
     Mesh::new(
@@ -149,6 +150,7 @@ pub fn farm_surface_mesh(seed: u64, polygon: &[Vec2], origin: Vec3) -> Mesh {
     .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
     .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
     .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, colors)
     .with_inserted_indices(bevy::mesh::Indices::U32(indices))
 }
 
@@ -164,21 +166,137 @@ pub fn polygon_centroid(polygon: &[Vec2]) -> Vec2 {
         / polygon.len() as f32
 }
 
-fn polygon_bounds(polygon: &[Vec2]) -> (Vec2, Vec2) {
-    let mut min = Vec2::splat(f32::MAX);
-    let mut max = Vec2::splat(f32::MIN);
-    for point in polygon {
-        min = min.min(*point);
-        max = max.max(*point);
+fn append_overlay_triangle(
+    seed: u64,
+    polygon: &[Vec2],
+    origin: Vec3,
+    center: Vec2,
+    edge_a: Vec2,
+    edge_b: Vec2,
+    positions: &mut Vec<[f32; 3]>,
+    normals: &mut Vec<[f32; 3]>,
+    uvs: &mut Vec<[f32; 2]>,
+    colors: &mut Vec<[f32; 4]>,
+    indices: &mut Vec<u32>,
+) {
+    let subdivisions = overlay_triangle_subdivisions(center, edge_a, edge_b);
+    let mut row_starts = Vec::with_capacity(subdivisions as usize + 1);
+    let n = subdivisions as f32;
+
+    for i in 0..=subdivisions {
+        row_starts.push(positions.len() as u32);
+        for j in 0..=(subdivisions - i) {
+            let edge_a_weight = i as f32 / n;
+            let edge_b_weight = j as f32 / n;
+            let center_weight = 1.0 - edge_a_weight - edge_b_weight;
+            let point = center * center_weight + edge_a * edge_a_weight + edge_b * edge_b_weight;
+            push_overlay_vertex(
+                seed, polygon, origin, point, positions, normals, uvs, colors,
+            );
+        }
     }
 
-    (min, max)
+    for i in 0..subdivisions {
+        for j in 0..(subdivisions - i) {
+            let a = overlay_vertex_index(&row_starts, i, j);
+            let b = overlay_vertex_index(&row_starts, i + 1, j);
+            let c = overlay_vertex_index(&row_starts, i, j + 1);
+            indices.extend([a, b, c]);
+
+            if j < subdivisions - i - 1 {
+                let d = overlay_vertex_index(&row_starts, i + 1, j + 1);
+                indices.extend([b, d, c]);
+            }
+        }
+    }
+}
+
+fn overlay_triangle_subdivisions(center: Vec2, edge_a: Vec2, edge_b: Vec2) -> u32 {
+    let max_edge = center
+        .distance(edge_a)
+        .max(center.distance(edge_b))
+        .max(edge_a.distance(edge_b));
+    (max_edge / FARM_OVERLAY_SAMPLE_STEP).ceil().max(1.0) as u32
+}
+
+fn overlay_vertex_index(row_starts: &[u32], row: u32, column: u32) -> u32 {
+    row_starts[row as usize] + column
+}
+
+fn push_overlay_vertex(
+    seed: u64,
+    polygon: &[Vec2],
+    origin: Vec3,
+    point: Vec2,
+    positions: &mut Vec<[f32; 3]>,
+    normals: &mut Vec<[f32; 3]>,
+    uvs: &mut Vec<[f32; 2]>,
+    colors: &mut Vec<[f32; 4]>,
+) {
+    let height = terrain_height(seed, point.x, point.y);
+    positions.push([
+        point.x - origin.x,
+        height - origin.y + FARM_OVERLAY_Y_OFFSET,
+        point.y - origin.z,
+    ]);
+    normals.push(farm_overlay_normal(seed, point.x, point.y));
+    uvs.push([point.x * 0.25, point.y * 0.25]);
+    colors.push([1.0, 1.0, 1.0, farm_overlay_alpha(point, polygon)]);
+}
+
+fn farm_overlay_normal(seed: u64, x: f32, z: f32) -> [f32; 3] {
+    let sample_dist = FARM_OVERLAY_SAMPLE_STEP;
+    let left = terrain_height(seed, x - sample_dist, z);
+    let right = terrain_height(seed, x + sample_dist, z);
+    let down = terrain_height(seed, x, z - sample_dist);
+    let up = terrain_height(seed, x, z + sample_dist);
+    Vec3::new(left - right, sample_dist * 2.0, down - up)
+        .normalize_or_zero()
+        .to_array()
+}
+
+fn farm_overlay_alpha(point: Vec2, polygon: &[Vec2]) -> f32 {
+    (distance_to_polygon_edge(point, polygon) / FARM_OVERLAY_EDGE_FEATHER).clamp(0.0, 1.0)
+}
+
+fn distance_to_polygon_edge(point: Vec2, polygon: &[Vec2]) -> f32 {
+    polygon
+        .iter()
+        .enumerate()
+        .map(|(index, start)| {
+            let end = polygon[(index + 1) % polygon.len()];
+            distance_to_segment(point, *start, end)
+        })
+        .fold(f32::MAX, f32::min)
+}
+
+fn distance_to_segment(point: Vec2, start: Vec2, end: Vec2) -> f32 {
+    let segment = end - start;
+    let length_squared = segment.length_squared();
+    if length_squared <= 0.0001 {
+        return point.distance(start);
+    }
+    let t = ((point - start).dot(segment) / length_squared).clamp(0.0, 1.0);
+    point.distance(start + segment * t)
+}
+
+fn empty_overlay_mesh() -> Mesh {
+    Mesh::new(
+        bevy::mesh::PrimitiveTopology::TriangleList,
+        bevy::asset::RenderAssetUsages::default(),
+    )
+    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, Vec::<[f32; 3]>::new())
+    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, Vec::<[f32; 3]>::new())
+    .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, Vec::<[f32; 2]>::new())
+    .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, Vec::<[f32; 4]>::new())
+    .with_inserted_indices(bevy::mesh::Indices::U32(Vec::new()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{building::footprint_polygon, terrain::DEFAULT_TERRAIN_SEED, types::BuildingKind};
+    use bevy::mesh::VertexAttributeValues;
 
     const SEED: u64 = DEFAULT_TERRAIN_SEED;
 
@@ -328,5 +446,50 @@ mod tests {
 
         assert!(blueprint.has_materials());
         assert!(blueprint.is_complete());
+    }
+
+    #[test]
+    fn farm_overlay_mesh_samples_finite_terrain_positions_and_normals() {
+        let polygon = vec![
+            Vec2::new(20.0, 20.0),
+            Vec2::new(23.0, 20.5),
+            Vec2::new(22.5, 23.0),
+            Vec2::new(20.0, 22.0),
+        ];
+        let origin = farm_origin(SEED, &polygon);
+        let mesh = farm_overlay_mesh(SEED, &polygon, origin);
+
+        let positions = match mesh.attribute(Mesh::ATTRIBUTE_POSITION).unwrap() {
+            VertexAttributeValues::Float32x3(values) => values,
+            values => panic!("unexpected position attribute: {values:?}"),
+        };
+        let normals = match mesh.attribute(Mesh::ATTRIBUTE_NORMAL).unwrap() {
+            VertexAttributeValues::Float32x3(values) => values,
+            values => panic!("unexpected normal attribute: {values:?}"),
+        };
+
+        assert!(!positions.is_empty());
+        assert_eq!(positions.len(), normals.len());
+        assert!(positions.iter().flatten().all(|value| value.is_finite()));
+        assert!(normals.iter().flatten().all(|value| value.is_finite()));
+        assert!(normals.iter().any(|normal| normal[1] > 0.5));
+    }
+
+    #[test]
+    fn farm_overlay_mesh_feathers_alpha_at_polygon_edge() {
+        let polygon = square();
+        let origin = farm_origin(SEED, &polygon);
+        let mesh = farm_overlay_mesh(SEED, &polygon, origin);
+
+        let colors = match mesh.attribute(Mesh::ATTRIBUTE_COLOR).unwrap() {
+            VertexAttributeValues::Float32x4(values) => values,
+            values => panic!("unexpected color attribute: {values:?}"),
+        };
+
+        let min_alpha = colors.iter().map(|color| color[3]).fold(f32::MAX, f32::min);
+        let max_alpha = colors.iter().map(|color| color[3]).fold(f32::MIN, f32::max);
+
+        assert!(min_alpha <= 0.01, "edge alpha was {min_alpha}");
+        assert!(max_alpha >= 0.99, "interior alpha was {max_alpha}");
     }
 }
