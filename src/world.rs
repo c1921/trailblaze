@@ -5,7 +5,7 @@ pub struct MainLight;
 
 use crate::{
     building::{
-        BuildingEntrance, BuildingVisual, CompletedBuilding, EntranceMarker, Footprint,
+        BuildingEntrance, BuildingVisual, CompletedBuilding, EntranceMarker, Footprint, Profession,
         WorldGeometry, footprint_polygon, resource_obstacle_polygon,
     },
     camera,
@@ -48,6 +48,7 @@ pub struct GameAssets {
     pub storage_material: Handle<StandardMaterial>,
     pub woodcutter_material: Handle<StandardMaterial>,
     pub gatherer_material: Handle<StandardMaterial>,
+    pub chopping_yard_material: Handle<StandardMaterial>,
     pub road_material: Handle<StandardMaterial>,
     pub entrance_material: Handle<StandardMaterial>,
     pub farm_blueprint_material: Handle<StandardMaterial>,
@@ -65,6 +66,7 @@ impl GameAssets {
             BuildingKind::Storage => self.storage_material.clone(),
             BuildingKind::Woodcutter => self.woodcutter_material.clone(),
             BuildingKind::Gatherer => self.gatherer_material.clone(),
+            BuildingKind::ChoppingYard => self.chopping_yard_material.clone(),
             BuildingKind::Road => self.road_material.clone(),
         }
     }
@@ -136,6 +138,7 @@ pub fn setup_scene(
         storage_material: materials.add(building_color(BuildingKind::Storage)),
         woodcutter_material: materials.add(building_color(BuildingKind::Woodcutter)),
         gatherer_material: materials.add(building_color(BuildingKind::Gatherer)),
+        chopping_yard_material: materials.add(building_color(BuildingKind::ChoppingYard)),
         road_material: materials.add(building_color(BuildingKind::Road)),
         entrance_material: materials.add(Color::srgb(0.95, 0.86, 0.28)),
         farm_blueprint_material,
@@ -380,6 +383,7 @@ fn spawn_resource_nodes(
         let (material, y_offset, scale) = match resource.kind {
             ResourceKind::Wood => (tree_material.clone(), 0.65, Vec3::new(0.8, 1.3, 0.8)),
             ResourceKind::Food => (food_material.clone(), 0.25, Vec3::new(0.8, 0.5, 0.8)),
+            ResourceKind::Firewood => (tree_material.clone(), 0.25, Vec3::new(0.6, 0.5, 0.6)),
         };
         let position = Vec3::new(
             resource.position.x,
@@ -419,6 +423,8 @@ fn spawn_colonists(
             Colonist {
                 name: format!("Settler {}", index + 1),
                 state: ColonistState::Idle,
+                profession: Profession::Unemployed,
+                workplace: None,
                 speed: 2.2,
                 home: None,
                 satiety: 100.0,

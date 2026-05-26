@@ -13,8 +13,10 @@ pub struct Inventory {
     pub capacity: i32,
     pub wood: i32,
     pub food: i32,
+    pub firewood: i32,
     accepts_wood: bool,
     accepts_food: bool,
+    accepts_firewood: bool,
 }
 
 impl Inventory {
@@ -23,8 +25,10 @@ impl Inventory {
             capacity,
             wood: 0,
             food: 0,
+            firewood: 0,
             accepts_wood: true,
             accepts_food: true,
+            accepts_firewood: true,
         }
     }
 
@@ -33,8 +37,10 @@ impl Inventory {
             capacity,
             wood: 0,
             food: 0,
+            firewood: 0,
             accepts_wood: false,
             accepts_food: true,
+            accepts_firewood: false,
         }
     }
 
@@ -42,6 +48,7 @@ impl Inventory {
         match kind {
             ResourceKind::Wood => self.wood,
             ResourceKind::Food => self.food,
+            ResourceKind::Firewood => self.firewood,
         }
     }
 
@@ -49,11 +56,14 @@ impl Inventory {
         match kind {
             ResourceKind::Wood => self.accepts_wood,
             ResourceKind::Food => self.accepts_food,
+            ResourceKind::Firewood => self.accepts_firewood,
         }
     }
 
     pub fn used_capacity(&self) -> i32 {
-        self.wood * ResourceKind::Wood.unit_size() + self.food * ResourceKind::Food.unit_size()
+        self.wood * ResourceKind::Wood.unit_size()
+            + self.food * ResourceKind::Food.unit_size()
+            + self.firewood * ResourceKind::Firewood.unit_size()
     }
 
     pub fn remaining_capacity(&self) -> i32 {
@@ -73,6 +83,7 @@ impl Inventory {
         match kind {
             ResourceKind::Wood => self.wood += accepted,
             ResourceKind::Food => self.food += accepted,
+            ResourceKind::Firewood => self.firewood += accepted,
         }
         accepted
     }
@@ -94,6 +105,7 @@ impl Inventory {
         match kind {
             ResourceKind::Wood => self.wood -= amount,
             ResourceKind::Food => self.food -= amount,
+            ResourceKind::Firewood => self.firewood -= amount,
         }
 
         true
@@ -110,6 +122,7 @@ pub struct CentralStorage;
 pub struct ResourceStock {
     pub wood: i32,
     pub food: i32,
+    pub firewood: i32,
 }
 
 impl ResourceStock {
@@ -118,6 +131,7 @@ impl ResourceStock {
         match kind {
             ResourceKind::Wood => self.wood,
             ResourceKind::Food => self.food,
+            ResourceKind::Firewood => self.firewood,
         }
     }
 }
@@ -127,6 +141,7 @@ pub fn public_stock<'a>(inventories: impl IntoIterator<Item = &'a Inventory>) ->
     for inventory in inventories {
         stock.wood += inventory.wood;
         stock.food += inventory.food;
+        stock.firewood += inventory.firewood;
     }
     stock
 }
@@ -184,11 +199,34 @@ mod tests {
         let mut public = Inventory::public(100);
         let mut home = Inventory::home_food(20);
         public.add(ResourceKind::Food, 5);
+        public.add(ResourceKind::Firewood, 7);
         home.add(ResourceKind::Food, 20);
 
         let stock = public_stock([&public]);
 
         assert_eq!(stock.food, 5);
+        assert_eq!(stock.firewood, 7);
         assert_eq!(stock.amount(ResourceKind::Food), 5);
+        assert_eq!(stock.amount(ResourceKind::Firewood), 7);
+    }
+
+    #[test]
+    fn firewood_uses_single_capacity_unit() {
+        let mut inventory = Inventory::public(10);
+
+        assert!(inventory.add(ResourceKind::Firewood, 10));
+        assert_eq!(inventory.used_capacity(), 10);
+        assert_eq!(inventory.max_addable(ResourceKind::Firewood), 0);
+        assert!(inventory.remove(ResourceKind::Firewood, 4));
+        assert_eq!(inventory.firewood, 6);
+        assert_eq!(inventory.max_addable(ResourceKind::Firewood), 4);
+    }
+
+    #[test]
+    fn home_inventory_rejects_firewood() {
+        let mut inventory = Inventory::home_food(HOUSE_FOOD_CAPACITY);
+
+        assert_eq!(inventory.max_addable(ResourceKind::Firewood), 0);
+        assert!(!inventory.add(ResourceKind::Firewood, 1));
     }
 }

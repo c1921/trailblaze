@@ -2,7 +2,7 @@ use bevy::pbr::wireframe::WireframeConfig;
 use bevy::prelude::*;
 
 use crate::{
-    building::Blueprint,
+    building::{Blueprint, Profession},
     colonist::{Colonist, ColonistState},
     resources::{COLONIST_CARRY_CAPACITY, CentralStorage, Inventory, PublicInventory},
     selection::{SelectedTarget, SelectionState},
@@ -29,6 +29,8 @@ pub enum DebugButton {
     AddWood1000,
     AddFood100,
     AddFood1000,
+    AddFirewood100,
+    AddFirewood1000,
     InstantFinishAll,
     InstantFinishSelected,
     ToggleFastBuild,
@@ -127,7 +129,25 @@ fn spawn_debug_console(mut commands: Commands) {
                     row.spawn(ui::utility_button("+1000 Food", DebugButton::AddFood1000));
                 });
 
-            // Row 4: Building
+            // Row 4: Firewood
+            parent
+                .spawn((Node {
+                    display: Display::Flex,
+                    column_gap: Val::Px(8.0),
+                    ..default()
+                },))
+                .with_children(|row| {
+                    row.spawn(ui::utility_button(
+                        "+100 Firewood",
+                        DebugButton::AddFirewood100,
+                    ));
+                    row.spawn(ui::utility_button(
+                        "+1000 Firewood",
+                        DebugButton::AddFirewood1000,
+                    ));
+                });
+
+            // Row 5: Building
             parent
                 .spawn((Node {
                     display: Display::Flex,
@@ -145,7 +165,7 @@ fn spawn_debug_console(mut commands: Commands) {
                     ));
                 });
 
-            // Row 5: Fast Build toggle (built manually for FastBuildLabel marker)
+            // Row 6: Fast Build toggle (built manually for FastBuildLabel marker)
             parent
                 .spawn((
                     Button,
@@ -161,7 +181,7 @@ fn spawn_debug_console(mut commands: Commands) {
                     ));
                 });
 
-            // Row 6: Wireframe toggle
+            // Row 7: Wireframe toggle
             parent
                 .spawn((
                     Button,
@@ -246,6 +266,18 @@ fn handle_debug_buttons(
                         &mut central_inventories,
                         &mut public_inventories,
                         ResourceKind::Food,
+                        1000,
+                    ),
+                    DebugButton::AddFirewood100 => add_debug_resource(
+                        &mut central_inventories,
+                        &mut public_inventories,
+                        ResourceKind::Firewood,
+                        100,
+                    ),
+                    DebugButton::AddFirewood1000 => add_debug_resource(
+                        &mut central_inventories,
+                        &mut public_inventories,
+                        ResourceKind::Firewood,
                         1000,
                     ),
                     DebugButton::InstantFinishAll => {
@@ -382,6 +414,8 @@ fn spawn_debug_colonists(
             Colonist {
                 name: format!("Settler {}", index + 1),
                 state: ColonistState::Idle,
+                profession: Profession::Unemployed,
+                workplace: None,
                 speed: 2.2,
                 home: None,
                 satiety: 100.0,

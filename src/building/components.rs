@@ -86,6 +86,64 @@ pub struct CompletedBuilding {
     pub kind: BuildingKind,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
+pub enum Profession {
+    #[default]
+    Unemployed,
+    Lumberjack,
+    Gatherer,
+    WoodSplitter,
+}
+
+impl Profession {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Unemployed => "Unemployed",
+            Self::Lumberjack => "Lumberjack",
+            Self::Gatherer => "Gatherer",
+            Self::WoodSplitter => "Wood Splitter",
+        }
+    }
+
+    pub fn for_building(kind: BuildingKind) -> Option<Self> {
+        match kind {
+            BuildingKind::Woodcutter => Some(Self::Lumberjack),
+            BuildingKind::Gatherer => Some(Self::Gatherer),
+            BuildingKind::ChoppingYard => Some(Self::WoodSplitter),
+            BuildingKind::House | BuildingKind::Storage | BuildingKind::Road => None,
+        }
+    }
+}
+
+#[derive(Component, Debug, Clone, Copy)]
+pub struct Workplace {
+    pub profession: Profession,
+    pub desired_slots: u8,
+    pub max_slots: u8,
+}
+
+impl Workplace {
+    pub const DEFAULT_MAX_SLOTS: u8 = 2;
+
+    pub fn for_building(kind: BuildingKind) -> Option<Self> {
+        let profession = Profession::for_building(kind)?;
+        Some(Self {
+            profession,
+            desired_slots: Self::DEFAULT_MAX_SLOTS,
+            max_slots: Self::DEFAULT_MAX_SLOTS,
+        })
+    }
+
+    pub fn clamp_desired_slots(&mut self) {
+        self.desired_slots = self.desired_slots.min(self.max_slots);
+    }
+
+    pub fn adjust_desired_slots(&mut self, delta: i8) {
+        let next = self.desired_slots as i16 + delta as i16;
+        self.desired_slots = next.clamp(0, self.max_slots as i16) as u8;
+    }
+}
+
 #[derive(Component, Debug, Default)]
 pub struct Housing {
     pub residents: Vec<Entity>,

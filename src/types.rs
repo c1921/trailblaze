@@ -9,6 +9,7 @@ pub const MAP_BUILD_HALF_EXTENT: f32 = (MAP_HALF_CELLS as f32 + 0.5) * CELL_SIZE
 pub enum ResourceKind {
     Wood,
     Food,
+    Firewood,
 }
 
 impl ResourceKind {
@@ -16,6 +17,7 @@ impl ResourceKind {
         match self {
             Self::Wood => "Wood",
             Self::Food => "Food",
+            Self::Firewood => "Firewood",
         }
     }
 
@@ -23,6 +25,7 @@ impl ResourceKind {
         match self {
             Self::Wood => 10,
             Self::Food => 1,
+            Self::Firewood => 1,
         }
     }
 }
@@ -33,6 +36,7 @@ pub enum BuildingKind {
     Storage,
     Woodcutter,
     Gatherer,
+    ChoppingYard,
     Road,
 }
 
@@ -42,13 +46,14 @@ pub enum ConstructionKind {
     Farm,
 }
 
-pub const CONSTRUCTION_KINDS: [ConstructionKind; 6] = [
+pub const CONSTRUCTION_KINDS: [ConstructionKind; 7] = [
     ConstructionKind::Building(BuildingKind::House),
     ConstructionKind::Building(BuildingKind::Storage),
     ConstructionKind::Building(BuildingKind::Woodcutter),
     ConstructionKind::Building(BuildingKind::Gatherer),
     ConstructionKind::Building(BuildingKind::Road),
     ConstructionKind::Farm,
+    ConstructionKind::Building(BuildingKind::ChoppingYard),
 ];
 
 #[derive(Clone, Copy, Debug)]
@@ -96,6 +101,14 @@ impl BuildingKind {
                 height: 1.0,
                 population_capacity: 0,
             },
+            Self::ChoppingYard => BuildingDefinition {
+                label: "Chopping Yard",
+                size: IVec2::new(2, 2),
+                wood_cost: 10,
+                build_seconds: 4.0,
+                height: 0.8,
+                population_capacity: 0,
+            },
             Self::Road => BuildingDefinition {
                 label: "Road",
                 size: IVec2::new(1, 1),
@@ -113,6 +126,7 @@ impl BuildingKind {
             Self::Storage => KeyCode::Digit2,
             Self::Woodcutter => KeyCode::Digit3,
             Self::Gatherer => KeyCode::Digit4,
+            Self::ChoppingYard => KeyCode::Digit7,
             Self::Road => KeyCode::Digit5,
         }
     }
@@ -121,8 +135,9 @@ impl BuildingKind {
         match self {
             Self::House => "Provides housing capacity for settlers.",
             Self::Storage => "Receives gathered supplies and construction materials.",
-            Self::Woodcutter => "Unlocks automatic wood gathering from tree resource nodes.",
-            Self::Gatherer => "Unlocks automatic food gathering from forage resource nodes.",
+            Self::Woodcutter => "Provides lumberjack jobs for gathering wood from trees.",
+            Self::Gatherer => "Provides gatherer jobs for collecting food from forage nodes.",
+            Self::ChoppingYard => "Splits wood into firewood when staffed.",
             Self::Road => "Marks planned paths through the settlement.",
         }
     }
@@ -158,6 +173,7 @@ impl ConstructionKind {
             Self::Building(BuildingKind::Gatherer) => "4",
             Self::Building(BuildingKind::Road) => "5",
             Self::Farm => "6",
+            Self::Building(BuildingKind::ChoppingYard) => "7",
         }
     }
 
@@ -182,6 +198,7 @@ pub fn building_color(kind: BuildingKind) -> Color {
         BuildingKind::Storage => Color::srgb(0.72, 0.58, 0.34),
         BuildingKind::Woodcutter => Color::srgb(0.35, 0.55, 0.23),
         BuildingKind::Gatherer => Color::srgb(0.45, 0.38, 0.68),
+        BuildingKind::ChoppingYard => Color::srgb(0.64, 0.42, 0.22),
         BuildingKind::Road => Color::srgb(0.22, 0.2, 0.18),
     }
 }

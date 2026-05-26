@@ -1,7 +1,12 @@
+use std::collections::HashMap;
+
 use bevy::prelude::*;
 
 use crate::{
-    building::{Blueprint, BuildingEntrance, CompletedBuilding, Housing, WorldGeometry},
+    building::{
+        Blueprint, BuildingEntrance, CompletedBuilding, Housing, Profession, Workplace,
+        WorldGeometry,
+    },
     math::xz_distance,
     navigation::{
         NavGrid, PathPlanner, PathRequestId, poll_path_planner, submit_path_planner, sync_nav_grid,
@@ -14,6 +19,9 @@ use crate::{
 };
 
 const GATHER_SECONDS: f32 = 1.4;
+const WOOD_SPLIT_SECONDS: f32 = 2.0;
+const WOOD_SPLIT_INPUT: i32 = 1;
+const WOOD_SPLIT_OUTPUT: i32 = 5;
 const BUILD_RATE: f32 = 1.0;
 const COLONIST_HALF_HEIGHT: f32 = 0.32;
 const SATIETY_LOSS_SECONDS: f32 = 10.0;
@@ -36,6 +44,7 @@ impl Plugin for ColonistPlugin {
                     poll_path_planner,
                     tick_colonist_needs,
                     assign_housing,
+                    assign_workplaces,
                     assign_idle_colonists,
                     update_colonists,
                     submit_path_planner,
@@ -49,6 +58,8 @@ impl Plugin for ColonistPlugin {
 pub struct Colonist {
     pub name: String,
     pub state: ColonistState,
+    pub profession: Profession,
+    pub workplace: Option<Entity>,
     pub speed: f32,
     pub home: Option<Entity>,
     pub satiety: f32,
@@ -85,6 +96,11 @@ pub enum ColonistState {
         amount: i32,
         timer: f32,
     },
+    SplittingWood {
+        workplace: Entity,
+        output_amount: i32,
+        timer: f32,
+    },
     Building {
         blueprint: Entity,
     },
@@ -118,6 +134,16 @@ pub enum Task {
         kind: ResourceKind,
         amount: i32,
     },
+    PickupWoodForSplitting {
+        source: Entity,
+        workplace: Entity,
+        amount: i32,
+        work_target: Vec3,
+    },
+    StartWoodSplitting {
+        workplace: Entity,
+        input_amount: i32,
+    },
     Deposit {
         inventory: Entity,
         kind: ResourceKind,
@@ -144,6 +170,7 @@ impl ColonistState {
             Self::Moving { task, .. } => format!("Moving: {}", task.label()),
             Self::PlanningPath { task, .. } => format!("Planning: {}", task.label()),
             Self::Gathering { kind, .. } => format!("Gathering {}", kind.label()),
+            Self::SplittingWood { .. } => "Splitting wood".to_string(),
             Self::Building { .. } => "Building a blueprint".to_string(),
             Self::Eating { .. } => "Eating".to_string(),
             Self::WaitingForPathRetry { .. } => "Waiting for a path".to_string(),
@@ -162,6 +189,10 @@ impl Task {
             }
             Self::Build { .. } => "Going to build".to_string(),
             Self::Gather { kind, .. } => format!("Going to gather {}", kind.label()),
+            Self::PickupWoodForSplitting { amount, .. } => {
+                format!("Picking up {} Wood for splitting", amount)
+            }
+            Self::StartWoodSplitting { .. } => "Going to split wood".to_string(),
             Self::Deposit { kind, amount, .. } => {
                 format!("Depositing {} {}", amount, kind.label())
             }
@@ -239,6 +270,89 @@ pub fn assign_housing(
     }
 }
 
+pub fn assign_workplaces(
+    mut colonists: Query<(Entity, &mut Colonist, &Transform)>,
+    mut workplaces: Query<(Entity, &mut Workplace, &Transform), Without<Colonist>>,
+) {
+    let snapshots: Vec<WorkplaceSnapshot> = workplaces
+        .iter_mut()
+        .map(|(entity, mut workplace, transform)| {
+            workplace.clamp_desired_slots();
+            WorkplaceSnapshot {
+                entity,
+                profession: workplace.profession,
+                desired_slots: workplace.desired_slots,
+                position: transform.translation,
+            }
+        })
+        .collect();
+
+    let mut assigned_counts: HashMap<Entity, u8> = HashMap::new();
+    for (_, mut colonist, _) in &mut colonists {
+        let Some(workplace_entity) = colonist.workplace else {
+            colonist.profession = Profession::Unemployed;
+            continue;
+        };
+
+        let Some(snapshot) = snapshots
+            .iter()
+            .find(|snapshot| snapshot.entity == workplace_entity)
+        else {
+            colonist.profession = Profession::Unemployed;
+            colonist.workplace = None;
+            continue;
+        };
+
+        let count = assigned_counts.entry(workplace_entity).or_insert(0);
+        if colonist.profession != snapshot.profession || *count >= snapshot.desired_slots {
+            colonist.profession = Profession::Unemployed;
+            colonist.workplace = None;
+        } else {
+            *count += 1;
+        }
+    }
+
+    for (_, mut colonist, transform) in &mut colonists {
+        if colonist.profession != Profession::Unemployed || colonist.workplace.is_some() {
+            continue;
+        }
+
+        let Some(snapshot) =
+            best_workplace_candidate(&snapshots, &assigned_counts, transform.translation)
+        else {
+            continue;
+        };
+
+        colonist.profession = snapshot.profession;
+        colonist.workplace = Some(snapshot.entity);
+        *assigned_counts.entry(snapshot.entity).or_insert(0) += 1;
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct WorkplaceSnapshot {
+    entity: Entity,
+    profession: Profession,
+    desired_slots: u8,
+    position: Vec3,
+}
+
+fn best_workplace_candidate(
+    workplaces: &[WorkplaceSnapshot],
+    assigned_counts: &HashMap<Entity, u8>,
+    start: Vec3,
+) -> Option<WorkplaceSnapshot> {
+    workplaces
+        .iter()
+        .copied()
+        .filter(|snapshot| {
+            assigned_counts.get(&snapshot.entity).copied().unwrap_or(0) < snapshot.desired_slots
+        })
+        .min_by(|left, right| {
+            xz_distance(start, left.position).total_cmp(&xz_distance(start, right.position))
+        })
+}
+
 pub fn assign_idle_colonists(
     nav_grid: Res<NavGrid>,
     terrain_seed: Res<TerrainSeed>,
@@ -246,7 +360,7 @@ pub fn assign_idle_colonists(
     mut colonists: Query<(&mut Colonist, &Transform)>,
     blueprints: Query<(Entity, &Blueprint, &Transform, Option<&BuildingEntrance>)>,
     resources: Query<(Entity, &ResourceNode, &Transform)>,
-    completed: Query<(&CompletedBuilding, &Transform, Option<&BuildingEntrance>)>,
+    workplaces: Query<(Entity, &Workplace, &Transform, Option<&BuildingEntrance>)>,
     inventories: Query<
         (
             Entity,
@@ -262,12 +376,6 @@ pub fn assign_idle_colonists(
 ) {
     let seed = terrain_seed.0;
     let mut reservations = AssignmentReservations::from_colonists(&colonists);
-    let has_woodcutter = completed
-        .iter()
-        .any(|(building, _, _)| building.kind == BuildingKind::Woodcutter);
-    let has_gatherer = completed
-        .iter()
-        .any(|(building, _, _)| building.kind == BuildingKind::Gatherer);
 
     for (mut colonist, transform) in &mut colonists {
         if colonist.satiety <= 0.0 {
@@ -292,6 +400,22 @@ pub fn assign_idle_colonists(
                 colonist.state = state;
                 continue;
             }
+        }
+
+        if let Some((reservation, state)) = profession_task_candidate(
+            &nav_grid,
+            &mut planner,
+            start,
+            &colonist,
+            &resources,
+            &workplaces,
+            &inventories,
+            &reservations,
+            seed,
+        ) {
+            reservations.reserve_production_assignment(reservation);
+            colonist.state = state;
+            continue;
         }
 
         let mut assigned = false;
@@ -329,48 +453,28 @@ pub fn assign_idle_colonists(
             colonist.state = state;
             continue;
         }
-
-        if has_woodcutter {
-            if let Some((_, resource, amount, state)) = gather_candidate(
-                &nav_grid,
-                &mut planner,
-                start,
-                ResourceKind::Wood,
-                &resources,
-                &inventories,
-                &reservations,
-                colonist.carry_capacity,
-                seed,
-            ) {
-                reservations.reserve_gather(resource, ResourceKind::Wood, amount);
-                colonist.state = state;
-                continue;
-            }
-        }
-
-        if has_gatherer {
-            if let Some((_, resource, amount, state)) = gather_candidate(
-                &nav_grid,
-                &mut planner,
-                start,
-                ResourceKind::Food,
-                &resources,
-                &inventories,
-                &reservations,
-                colonist.carry_capacity,
-                seed,
-            ) {
-                reservations.reserve_gather(resource, ResourceKind::Food, amount);
-                colonist.state = state;
-            }
-        }
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ProductionReservation {
+    Gather {
+        resource: Entity,
+        kind: ResourceKind,
+        amount: i32,
+    },
+    SplitWood {
+        source: Entity,
+        input_amount: i32,
+        output_amount: i32,
+    },
 }
 
 #[derive(Default)]
 struct AssignmentReservations {
     material_deliveries: Vec<(Entity, i32)>,
     gathered_resources: Vec<(Entity, i32)>,
+    inventory_withdrawals: Vec<(Entity, ResourceKind, i32)>,
     public_deposits: Vec<(ResourceKind, i32)>,
 }
 
@@ -394,6 +498,9 @@ impl AssignmentReservations {
                 ..
             } => {
                 self.reserve_gather(*resource, *kind, *amount);
+            }
+            ColonistState::SplittingWood { output_amount, .. } => {
+                self.reserve_public_deposit(ResourceKind::Firewood, *output_amount);
             }
             ColonistState::Idle
             | ColonistState::Building { .. }
@@ -420,6 +527,16 @@ impl AssignmentReservations {
                 kind,
                 amount,
             } => self.reserve_gather(*resource, *kind, *amount),
+            Task::PickupWoodForSplitting { source, amount, .. } => {
+                self.reserve_inventory_withdrawal(*source, ResourceKind::Wood, *amount);
+                self.reserve_public_deposit(ResourceKind::Firewood, *amount * WOOD_SPLIT_OUTPUT);
+            }
+            Task::StartWoodSplitting { input_amount, .. } => {
+                self.reserve_public_deposit(
+                    ResourceKind::Firewood,
+                    *input_amount * WOOD_SPLIT_OUTPUT,
+                );
+            }
             Task::Deposit { kind, amount, .. } => self.reserve_public_deposit(*kind, *amount),
             Task::PickupMaterial { .. }
             | Task::DeliverMaterial { .. }
@@ -460,12 +577,207 @@ impl AssignmentReservations {
         self.public_deposits.push((kind, amount.max(0)));
     }
 
+    fn reserve_inventory_withdrawal(&mut self, inventory: Entity, kind: ResourceKind, amount: i32) {
+        self.inventory_withdrawals
+            .push((inventory, kind, amount.max(0)));
+    }
+
+    fn reserved_inventory_withdrawal(&self, inventory: Entity, kind: ResourceKind) -> i32 {
+        self.inventory_withdrawals
+            .iter()
+            .filter(|(entity, resource_kind, _)| *entity == inventory && *resource_kind == kind)
+            .map(|(_, _, amount)| *amount)
+            .sum()
+    }
+
+    fn reserve_production_assignment(&mut self, reservation: ProductionReservation) {
+        match reservation {
+            ProductionReservation::Gather {
+                resource,
+                kind,
+                amount,
+            } => self.reserve_gather(resource, kind, amount),
+            ProductionReservation::SplitWood {
+                source,
+                input_amount,
+                output_amount,
+            } => {
+                self.reserve_inventory_withdrawal(source, ResourceKind::Wood, input_amount);
+                self.reserve_public_deposit(ResourceKind::Firewood, output_amount);
+            }
+        }
+    }
+
     fn reserved_public_capacity(&self) -> i32 {
         self.public_deposits
             .iter()
             .map(|(kind, amount)| *amount * kind.unit_size())
             .sum()
     }
+}
+
+fn profession_task_candidate(
+    nav_grid: &NavGrid,
+    planner: &mut PathPlanner,
+    start: Vec3,
+    colonist: &Colonist,
+    resources: &Query<(Entity, &ResourceNode, &Transform)>,
+    workplaces: &Query<(Entity, &Workplace, &Transform, Option<&BuildingEntrance>)>,
+    inventories: &Query<
+        (
+            Entity,
+            &Inventory,
+            &Transform,
+            Option<&BuildingEntrance>,
+            Option<&PublicInventory>,
+            Option<&Housing>,
+            Option<&CompletedBuilding>,
+        ),
+        Without<Colonist>,
+    >,
+    reservations: &AssignmentReservations,
+    seed: u64,
+) -> Option<(ProductionReservation, ColonistState)> {
+    if colonist.profession != Profession::Unemployed && colonist.workplace.is_none() {
+        return None;
+    }
+
+    match colonist.profession {
+        Profession::Lumberjack => {
+            let (_, resource, amount, state) = gather_candidate(
+                nav_grid,
+                planner,
+                start,
+                ResourceKind::Wood,
+                resources,
+                inventories,
+                reservations,
+                colonist.carry_capacity,
+                seed,
+            )?;
+            Some((
+                ProductionReservation::Gather {
+                    resource,
+                    kind: ResourceKind::Wood,
+                    amount,
+                },
+                state,
+            ))
+        }
+        Profession::Gatherer => {
+            let (_, resource, amount, state) = gather_candidate(
+                nav_grid,
+                planner,
+                start,
+                ResourceKind::Food,
+                resources,
+                inventories,
+                reservations,
+                colonist.carry_capacity,
+                seed,
+            )?;
+            Some((
+                ProductionReservation::Gather {
+                    resource,
+                    kind: ResourceKind::Food,
+                    amount,
+                },
+                state,
+            ))
+        }
+        Profession::WoodSplitter => wood_splitting_candidate(
+            nav_grid,
+            planner,
+            start,
+            colonist,
+            workplaces,
+            inventories,
+            reservations,
+            seed,
+        ),
+        Profession::Unemployed => None,
+    }
+}
+
+fn wood_splitting_candidate(
+    nav_grid: &NavGrid,
+    planner: &mut PathPlanner,
+    start: Vec3,
+    colonist: &Colonist,
+    workplaces: &Query<(Entity, &Workplace, &Transform, Option<&BuildingEntrance>)>,
+    inventories: &Query<
+        (
+            Entity,
+            &Inventory,
+            &Transform,
+            Option<&BuildingEntrance>,
+            Option<&PublicInventory>,
+            Option<&Housing>,
+            Option<&CompletedBuilding>,
+        ),
+        Without<Colonist>,
+    >,
+    reservations: &AssignmentReservations,
+    seed: u64,
+) -> Option<(ProductionReservation, ColonistState)> {
+    let workplace_entity = colonist.workplace?;
+    let (_, workplace, workplace_transform, workplace_entrance) =
+        workplaces.get(workplace_entity).ok()?;
+    if workplace.profession != Profession::WoodSplitter {
+        return None;
+    }
+
+    let firewood_capacity =
+        total_public_addable_after_reserved(inventories, reservations, ResourceKind::Firewood);
+    if firewood_capacity < WOOD_SPLIT_OUTPUT {
+        return None;
+    }
+
+    let work_target = building_interaction_position(workplace_transform, workplace_entrance);
+    let mut candidates: Vec<(f32, Entity, Vec3)> = inventories
+        .iter()
+        .filter_map(|(source, inventory, transform, entrance, public, _, _)| {
+            if public.is_none() {
+                return None;
+            }
+            let available = inventory.amount(ResourceKind::Wood)
+                - reservations.reserved_inventory_withdrawal(source, ResourceKind::Wood);
+            if available < WOOD_SPLIT_INPUT {
+                return None;
+            }
+
+            let source_target = building_interaction_position(transform, entrance);
+            Some((
+                xz_distance(start, source_target) + xz_distance(source_target, work_target),
+                source,
+                source_target,
+            ))
+        })
+        .collect();
+    candidates.sort_by(|(dist_a, ..), (dist_b, ..)| dist_a.total_cmp(dist_b));
+
+    for (_, source, source_target) in candidates {
+        let task = Task::PickupWoodForSplitting {
+            source,
+            workplace: workplace_entity,
+            amount: WOOD_SPLIT_INPUT,
+            work_target,
+        };
+        if let Some((state, _)) =
+            moving_state_to_target(nav_grid, planner, start, source_target, task, seed)
+        {
+            return Some((
+                ProductionReservation::SplitWood {
+                    source,
+                    input_amount: WOOD_SPLIT_INPUT,
+                    output_amount: WOOD_SPLIT_OUTPUT,
+                },
+                state,
+            ));
+        }
+    }
+
+    None
 }
 
 fn eat_candidate(
@@ -866,6 +1178,17 @@ fn building_interaction_position(
         .unwrap_or(transform.translation)
 }
 
+fn valid_workplace(
+    workplaces: &Query<&Workplace, Without<Colonist>>,
+    entity: Entity,
+    profession: Profession,
+) -> bool {
+    workplaces
+        .get(entity)
+        .map(|workplace| workplace.profession == profession)
+        .unwrap_or(false)
+}
+
 fn moving_state_to_target(
     nav_grid: &NavGrid,
     planner: &mut PathPlanner,
@@ -1030,6 +1353,7 @@ pub fn update_colonists(
     mut colonists: Query<(&mut Colonist, &mut Transform)>,
     mut blueprints: Query<(Entity, &mut Blueprint)>,
     mut resources: Query<&mut ResourceNode>,
+    workplaces: Query<&Workplace, Without<Colonist>>,
     mut inventory_access: ParamSet<(
         Query<
             (
@@ -1083,7 +1407,11 @@ pub fn update_colonists(
                 task,
                 nav_revision,
             } => {
-                if !moving_task_is_valid(&task, &mut resources) {
+                let task_valid = {
+                    let inventories = inventory_access.p0();
+                    moving_task_is_valid(&task, &mut resources, &workplaces, &inventories)
+                };
+                if !task_valid {
                     colonist.state = ColonistState::Idle;
                     continue;
                 }
@@ -1111,6 +1439,7 @@ pub fn update_colonists(
                         &mut planner,
                         &mut inventory_access,
                         &mut blueprints,
+                        &workplaces,
                         &mut colonist,
                         transform.translation,
                         task,
@@ -1130,7 +1459,11 @@ pub fn update_colonists(
                 target,
                 task,
             } => {
-                if !moving_task_is_valid(&task, &mut resources) {
+                let task_valid = {
+                    let inventories = inventory_access.p0();
+                    moving_task_is_valid(&task, &mut resources, &workplaces, &inventories)
+                };
+                if !task_valid {
                     colonist.state = ColonistState::Idle;
                     continue;
                 }
@@ -1229,6 +1562,39 @@ pub fn update_colonists(
                     colonist.state = ColonistState::Idle;
                 }
             }
+            ColonistState::SplittingWood {
+                workplace,
+                output_amount,
+                mut timer,
+            } => {
+                if !valid_workplace(&workplaces, workplace, Profession::WoodSplitter) {
+                    colonist.state = ColonistState::Idle;
+                    continue;
+                }
+
+                timer += dt;
+                if timer < WOOD_SPLIT_SECONDS {
+                    colonist.state = ColonistState::SplittingWood {
+                        workplace,
+                        output_amount,
+                        timer,
+                    };
+                    continue;
+                }
+
+                let inventories = inventory_access.p0();
+                colonist.state = deposit_moving_state(
+                    &nav_grid,
+                    &mut planner,
+                    transform.translation,
+                    &inventories,
+                    ResourceKind::Firewood,
+                    output_amount,
+                    seed,
+                    None,
+                )
+                .unwrap_or(ColonistState::Idle);
+            }
             ColonistState::Building {
                 blueprint: blueprint_entity,
             } => {
@@ -1272,6 +1638,7 @@ fn complete_movement_task(
         Query<&mut Inventory>,
     )>,
     blueprints: &mut Query<(Entity, &mut Blueprint)>,
+    workplaces: &Query<&Workplace, Without<Colonist>>,
     colonist: &mut Colonist,
     position: Vec3,
     task: Task,
@@ -1339,6 +1706,55 @@ fn complete_movement_task(
             amount,
             timer: 0.0,
         },
+        Task::PickupWoodForSplitting {
+            source,
+            workplace,
+            amount,
+            work_target,
+        } => {
+            let removed =
+                remove_from_inventory(inventory_access, source, ResourceKind::Wood, amount);
+            if !removed {
+                return ColonistState::Idle;
+            }
+
+            if valid_workplace(workplaces, workplace, Profession::WoodSplitter) {
+                moving_state_to_target(
+                    nav_grid,
+                    planner,
+                    position,
+                    work_target,
+                    Task::StartWoodSplitting {
+                        workplace,
+                        input_amount: amount,
+                    },
+                    seed,
+                )
+                .map(|(state, _)| state)
+                .unwrap_or_else(|| {
+                    add_to_nearest_public(inventory_access, position, ResourceKind::Wood, amount);
+                    path_retry_state()
+                })
+            } else {
+                add_to_nearest_public(inventory_access, position, ResourceKind::Wood, amount);
+                ColonistState::Idle
+            }
+        }
+        Task::StartWoodSplitting {
+            workplace,
+            input_amount,
+        } => {
+            if valid_workplace(workplaces, workplace, Profession::WoodSplitter) {
+                ColonistState::SplittingWood {
+                    workplace,
+                    output_amount: input_amount * WOOD_SPLIT_OUTPUT,
+                    timer: 0.0,
+                }
+            } else {
+                add_to_nearest_public(inventory_access, position, ResourceKind::Wood, input_amount);
+                ColonistState::Idle
+            }
+        }
         Task::Deposit {
             inventory,
             kind,
@@ -1529,7 +1945,23 @@ fn add_to_nearest_public(
     remaining
 }
 
-fn moving_task_is_valid(task: &Task, resources: &mut Query<&mut ResourceNode>) -> bool {
+fn moving_task_is_valid(
+    task: &Task,
+    resources: &mut Query<&mut ResourceNode>,
+    workplaces: &Query<&Workplace, Without<Colonist>>,
+    inventories: &Query<
+        (
+            Entity,
+            &Inventory,
+            &Transform,
+            Option<&BuildingEntrance>,
+            Option<&PublicInventory>,
+            Option<&Housing>,
+            Option<&CompletedBuilding>,
+        ),
+        Without<Colonist>,
+    >,
+) -> bool {
     match task {
         Task::Gather {
             resource,
@@ -1539,6 +1971,21 @@ fn moving_task_is_valid(task: &Task, resources: &mut Query<&mut ResourceNode>) -
             .get_mut(*resource)
             .map(|node| node.kind == *kind && node.amount >= *amount && *amount > 0)
             .unwrap_or(false),
+        Task::PickupWoodForSplitting {
+            source,
+            workplace,
+            amount,
+            ..
+        } => {
+            valid_workplace(workplaces, *workplace, Profession::WoodSplitter)
+                && inventories
+                    .get(*source)
+                    .map(|(_, inventory, _, _, public, _, _)| {
+                        public.is_some() && inventory.amount(ResourceKind::Wood) >= *amount
+                    })
+                    .unwrap_or(false)
+        }
+        Task::StartWoodSplitting { .. } => true,
         Task::PickupMaterial { .. }
         | Task::DeliverMaterial { .. }
         | Task::Build { .. }
@@ -1578,11 +2025,16 @@ fn unreachable_moving_state(
             add_to_nearest_public(inventory_access, target, ResourceKind::Food, amount);
             path_retry_state()
         }
+        Task::StartWoodSplitting { input_amount, .. } => {
+            add_to_nearest_public(inventory_access, target, ResourceKind::Wood, input_amount);
+            path_retry_state()
+        }
         Task::PickupMaterial { .. }
         | Task::Build { .. }
         | Task::Gather { .. }
         | Task::Eat { .. }
-        | Task::PickupHomeFood { .. } => path_retry_state(),
+        | Task::PickupHomeFood { .. }
+        | Task::PickupWoodForSplitting { .. } => path_retry_state(),
     }
 }
 
@@ -1662,13 +2114,26 @@ fn best_home_candidate(homes: &[(Entity, usize, Vec3)], start: Vec3) -> Option<u
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::resources::COLONIST_CARRY_CAPACITY;
+    use crate::resources::{COLONIST_CARRY_CAPACITY, Inventory, PublicInventory};
     use crate::terrain::DEFAULT_TERRAIN_SEED;
 
     const SEED: u64 = DEFAULT_TERRAIN_SEED;
 
     fn test_entity(index: u32) -> Entity {
         Entity::from_raw_u32(index).unwrap()
+    }
+
+    fn test_colonist(name: &str, profession: Profession, workplace: Option<Entity>) -> Colonist {
+        Colonist {
+            name: name.to_string(),
+            state: ColonistState::Idle,
+            profession,
+            workplace,
+            speed: 2.2,
+            home: None,
+            satiety: 100.0,
+            carry_capacity: COLONIST_CARRY_CAPACITY,
+        }
     }
 
     #[test]
@@ -1723,6 +2188,8 @@ mod tests {
         let colonist = Colonist {
             name: "Test".to_string(),
             state: ColonistState::Idle,
+            profession: Profession::Unemployed,
+            workplace: None,
             speed: 1.0,
             home: None,
             satiety: 49.9,
@@ -1756,6 +2223,287 @@ mod tests {
         let selected = best_home_candidate(&homes, Vec3::ZERO).unwrap();
 
         assert_eq!(homes[selected].0, far_empty);
+    }
+
+    #[test]
+    fn workplace_candidate_uses_open_slots_by_distance() {
+        let near = test_entity(1);
+        let far = test_entity(2);
+        let snapshots = vec![
+            WorkplaceSnapshot {
+                entity: near,
+                profession: Profession::Lumberjack,
+                desired_slots: 1,
+                position: Vec3::new(1.0, 0.0, 0.0),
+            },
+            WorkplaceSnapshot {
+                entity: far,
+                profession: Profession::Gatherer,
+                desired_slots: 1,
+                position: Vec3::new(5.0, 0.0, 0.0),
+            },
+        ];
+        let mut assigned_counts = HashMap::new();
+        assigned_counts.insert(near, 1);
+
+        let selected = best_workplace_candidate(&snapshots, &assigned_counts, Vec3::ZERO).unwrap();
+
+        assert_eq!(selected.entity, far);
+        assert_eq!(selected.profession, Profession::Gatherer);
+    }
+
+    #[test]
+    fn assign_workplaces_fills_and_releases_slots() {
+        let mut app = App::new();
+        app.add_systems(Update, assign_workplaces);
+        let workplace = app
+            .world_mut()
+            .spawn((
+                Transform::from_translation(Vec3::ZERO),
+                Workplace {
+                    profession: Profession::WoodSplitter,
+                    desired_slots: 2,
+                    max_slots: 2,
+                },
+            ))
+            .id();
+        let first = app
+            .world_mut()
+            .spawn((
+                Transform::from_translation(Vec3::new(1.0, 0.0, 0.0)),
+                test_colonist("First", Profession::Unemployed, None),
+            ))
+            .id();
+        let second = app
+            .world_mut()
+            .spawn((
+                Transform::from_translation(Vec3::new(2.0, 0.0, 0.0)),
+                test_colonist("Second", Profession::Unemployed, None),
+            ))
+            .id();
+
+        app.update();
+
+        assert_eq!(
+            app.world()
+                .entity(first)
+                .get::<Colonist>()
+                .unwrap()
+                .workplace,
+            Some(workplace)
+        );
+        assert_eq!(
+            app.world()
+                .entity(second)
+                .get::<Colonist>()
+                .unwrap()
+                .profession,
+            Profession::WoodSplitter
+        );
+
+        app.world_mut()
+            .entity_mut(workplace)
+            .get_mut::<Workplace>()
+            .unwrap()
+            .desired_slots = 1;
+        app.update();
+
+        let assigned = [first, second]
+            .into_iter()
+            .filter(|entity| {
+                app.world()
+                    .entity(*entity)
+                    .get::<Colonist>()
+                    .unwrap()
+                    .workplace
+                    == Some(workplace)
+            })
+            .count();
+
+        assert_eq!(assigned, 1);
+    }
+
+    #[test]
+    fn gathering_assignment_requires_matching_profession() {
+        let mut app = App::new();
+        app.insert_resource(TerrainSeed(SEED));
+        let mut geometry = WorldGeometry::default();
+        let mut nav_grid = NavGrid::default();
+        nav_grid.sync_for_test(&mut geometry, SEED);
+        app.insert_resource(nav_grid);
+        app.init_resource::<PathPlanner>();
+        app.add_systems(Update, assign_idle_colonists);
+
+        let workplace = app
+            .world_mut()
+            .spawn((
+                Transform::from_translation(Vec3::ZERO),
+                Workplace {
+                    profession: Profession::Lumberjack,
+                    desired_slots: 1,
+                    max_slots: 2,
+                },
+            ))
+            .id();
+        app.world_mut().spawn((
+            Transform::from_translation(Vec3::new(0.0, 0.0, 1.0)),
+            ResourceNode {
+                kind: ResourceKind::Wood,
+                amount: 10,
+            },
+        ));
+        app.world_mut().spawn((
+            Transform::from_translation(Vec3::new(0.0, 0.0, -1.0)),
+            Inventory::public(100),
+            PublicInventory,
+        ));
+        let lumberjack = app
+            .world_mut()
+            .spawn((
+                Transform::from_translation(Vec3::ZERO),
+                test_colonist("Lumberjack", Profession::Lumberjack, Some(workplace)),
+            ))
+            .id();
+        let unemployed = app
+            .world_mut()
+            .spawn((
+                Transform::from_translation(Vec3::new(0.5, 0.0, 0.0)),
+                test_colonist("Unemployed", Profession::Unemployed, None),
+            ))
+            .id();
+
+        app.update();
+
+        assert!(matches!(
+            app.world()
+                .entity(lumberjack)
+                .get::<Colonist>()
+                .unwrap()
+                .state,
+            ColonistState::PlanningPath {
+                task: Task::Gather {
+                    kind: ResourceKind::Wood,
+                    ..
+                },
+                ..
+            }
+        ));
+        assert!(matches!(
+            app.world()
+                .entity(unemployed)
+                .get::<Colonist>()
+                .unwrap()
+                .state,
+            ColonistState::Idle
+        ));
+    }
+
+    #[test]
+    fn wood_splitting_consumes_wood_and_deposits_firewood() {
+        let mut app = App::new();
+        let mut time = Time::<()>::default();
+        time.advance_by(std::time::Duration::from_secs_f32(0.1));
+        app.insert_resource(time);
+        app.insert_resource(SimulationClock::default());
+        app.insert_resource(TerrainSeed(SEED));
+        let mut geometry = WorldGeometry::default();
+        let mut nav_grid = NavGrid::default();
+        nav_grid.sync_for_test(&mut geometry, SEED);
+        app.insert_resource(geometry);
+        app.insert_resource(nav_grid);
+        app.init_resource::<PathPlanner>();
+        app.add_systems(Update, update_colonists);
+
+        let mut inventory = Inventory::public(100);
+        inventory.add(ResourceKind::Wood, 1);
+        let source = app
+            .world_mut()
+            .spawn((
+                Transform::from_translation(Vec3::ZERO),
+                inventory,
+                PublicInventory,
+            ))
+            .id();
+        let workplace = app
+            .world_mut()
+            .spawn((
+                Transform::from_translation(Vec3::ZERO),
+                Workplace {
+                    profession: Profession::WoodSplitter,
+                    desired_slots: 1,
+                    max_slots: 2,
+                },
+            ))
+            .id();
+        let colonist = app
+            .world_mut()
+            .spawn((
+                Transform::from_translation(Vec3::ZERO),
+                Colonist {
+                    state: ColonistState::Moving {
+                        target: Vec3::ZERO,
+                        path: Vec::new(),
+                        task: Task::PickupWoodForSplitting {
+                            source,
+                            workplace,
+                            amount: WOOD_SPLIT_INPUT,
+                            work_target: Vec3::ZERO,
+                        },
+                        nav_revision: 0,
+                    },
+                    ..test_colonist("Splitter", Profession::WoodSplitter, Some(workplace))
+                },
+            ))
+            .id();
+
+        app.update();
+
+        assert_eq!(
+            app.world()
+                .entity(source)
+                .get::<Inventory>()
+                .unwrap()
+                .amount(ResourceKind::Wood),
+            0
+        );
+
+        app.world_mut()
+            .entity_mut(colonist)
+            .get_mut::<Colonist>()
+            .unwrap()
+            .state = ColonistState::SplittingWood {
+            workplace,
+            output_amount: WOOD_SPLIT_OUTPUT,
+            timer: WOOD_SPLIT_SECONDS,
+        };
+
+        app.update();
+
+        app.world_mut()
+            .entity_mut(colonist)
+            .get_mut::<Colonist>()
+            .unwrap()
+            .state = ColonistState::Moving {
+            target: Vec3::ZERO,
+            path: Vec::new(),
+            task: Task::Deposit {
+                inventory: source,
+                kind: ResourceKind::Firewood,
+                amount: WOOD_SPLIT_OUTPUT,
+            },
+            nav_revision: 0,
+        };
+
+        app.update();
+
+        assert_eq!(
+            app.world()
+                .entity(source)
+                .get::<Inventory>()
+                .unwrap()
+                .amount(ResourceKind::Firewood),
+            WOOD_SPLIT_OUTPUT
+        );
     }
 
     #[test]

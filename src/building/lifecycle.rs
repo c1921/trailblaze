@@ -12,7 +12,7 @@ use crate::{
 
 use super::{
     Blueprint, BuildingEntrance, BuildingVisual, CompletedBuilding, EntranceMarker,
-    EntrancePreview, Footprint, Housing,
+    EntrancePreview, Footprint, Housing, Profession, Workplace,
 };
 
 pub(super) const ENTRANCE_MARKER_SCALE: Vec3 = Vec3::new(0.42, 0.08, 0.42);
@@ -82,7 +82,14 @@ pub fn finish_blueprints(
                         inventory.add(ResourceKind::Wood, 4);
                         commands.entity(entity).insert((inventory, PublicInventory));
                     }
-                    BuildingKind::Woodcutter | BuildingKind::Gatherer | BuildingKind::Road => {}
+                    BuildingKind::Woodcutter
+                    | BuildingKind::Gatherer
+                    | BuildingKind::ChoppingYard => {
+                        if let Some(workplace) = Workplace::for_building(kind) {
+                            commands.entity(entity).insert(workplace);
+                        }
+                    }
+                    BuildingKind::Road => {}
                 }
             }
             ConstructionKind::Farm => {
@@ -325,6 +332,7 @@ mod tests {
             storage_material: materials.add(Color::srgb(0.7, 0.6, 0.3)),
             woodcutter_material: materials.add(Color::srgb(0.3, 0.6, 0.2)),
             gatherer_material: materials.add(Color::srgb(0.5, 0.4, 0.7)),
+            chopping_yard_material: materials.add(Color::srgb(0.6, 0.4, 0.2)),
             road_material: materials.add(Color::srgb(0.2, 0.2, 0.2)),
             entrance_material: materials.add(Color::srgb(1.0, 0.9, 0.2)),
             farm_blueprint_material: materials.add(Color::srgba(0.4, 0.25, 0.12, 0.7)),
@@ -442,5 +450,32 @@ mod tests {
             .count();
 
         assert!(crop_count > 0);
+    }
+
+    #[test]
+    fn finish_blueprints_adds_workplace_to_chopping_yard() {
+        let mut app = App::new();
+        app.insert_resource(test_assets());
+        app.insert_resource(TerrainSeed(DEFAULT_TERRAIN_SEED));
+        app.add_systems(Update, finish_blueprints);
+
+        let yard = app
+            .world_mut()
+            .spawn(Blueprint {
+                kind: ConstructionKind::Building(BuildingKind::ChoppingYard),
+                required_wood: 0,
+                delivered_wood: 0,
+                progress: 1.0,
+                build_seconds: 1.0,
+            })
+            .id();
+
+        app.update();
+
+        let entity = app.world().entity(yard);
+        let workplace = entity.get::<Workplace>().unwrap();
+        assert_eq!(workplace.profession, Profession::WoodSplitter);
+        assert_eq!(workplace.desired_slots, Workplace::DEFAULT_MAX_SLOTS);
+        assert_eq!(workplace.max_slots, Workplace::DEFAULT_MAX_SLOTS);
     }
 }

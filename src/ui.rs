@@ -1,7 +1,9 @@
 use bevy::prelude::*;
 
 use crate::{
-    building::{Blueprint, BuildState, CompletedBuilding, Footprint, Housing, WorldGeometry},
+    building::{
+        Blueprint, BuildState, CompletedBuilding, Footprint, Housing, Workplace, WorldGeometry,
+    },
     colonist::Colonist,
     farm::{CompletedFarmPlot, FarmPlot},
     resources::{CentralStorage, Inventory, PublicInventory, public_stock},
@@ -84,6 +86,15 @@ pub struct SelectionTitle;
 pub struct SelectionBody;
 
 #[derive(Component)]
+pub struct JobControlsRoot;
+
+#[derive(Component)]
+pub struct JobSlotsText;
+
+#[derive(Component)]
+pub struct JobSlotButton(pub i8);
+
+#[derive(Component)]
 pub struct BuildButton(pub ConstructionKind);
 
 #[derive(Component)]
@@ -117,7 +128,7 @@ pub fn spawn_ui(mut commands: Commands) {
         children![
             (
                 ResourceText,
-                Text::new("Wood: 0  Food: 0  Pop: 0/0  Time: 1x"),
+                Text::new("Wood: 0  Food: 0  Firewood: 0  Pop: 0/0  Time: 1x"),
                 TextColor(Color::WHITE),
             ),
             (
@@ -180,6 +191,24 @@ pub fn spawn_ui(mut commands: Commands) {
                 Text::new("Click a settler, building, blueprint, or resource node."),
                 TextColor(Color::srgb(0.84, 0.88, 0.9)),
             ),
+            (
+                JobControlsRoot,
+                Node {
+                    display: Display::None,
+                    align_items: AlignItems::Center,
+                    column_gap: px(8),
+                    ..default()
+                },
+                children![
+                    job_slot_button("-", -1),
+                    (
+                        JobSlotsText,
+                        Text::new("Workers: 0/0"),
+                        TextColor(Color::srgb(0.9, 0.92, 0.86)),
+                    ),
+                    job_slot_button("+", 1),
+                ],
+            ),
         ],
     ));
 
@@ -203,6 +232,7 @@ pub fn spawn_ui(mut commands: Commands) {
             build_button(CONSTRUCTION_KINDS[3]),
             build_button(CONSTRUCTION_KINDS[4]),
             build_button(CONSTRUCTION_KINDS[5]),
+            build_button(CONSTRUCTION_KINDS[6]),
             utility_button("Snap G", SnapButton),
             time_button("Pause", TimeButton::Pause),
             time_button("1x", TimeButton::Speed(1.0)),
@@ -215,6 +245,8 @@ pub fn spawn_ui(mut commands: Commands) {
 pub fn handle_ui_buttons(
     mut build_state: ResMut<BuildState>,
     mut clock: ResMut<SimulationClock>,
+    selection: Res<SelectionState>,
+    mut workplaces: Query<&mut Workplace>,
     mut build_buttons: Query<
         (&Interaction, &BuildButton, &mut BackgroundColor),
         (
@@ -222,6 +254,7 @@ pub fn handle_ui_buttons(
             With<Button>,
             Without<SnapButton>,
             Without<TimeButton>,
+            Without<JobSlotButton>,
         ),
     >,
     mut snap_buttons: Query<
@@ -232,6 +265,7 @@ pub fn handle_ui_buttons(
             With<SnapButton>,
             Without<BuildButton>,
             Without<TimeButton>,
+            Without<JobSlotButton>,
         ),
     >,
     mut time_buttons: Query<
@@ -241,6 +275,17 @@ pub fn handle_ui_buttons(
             With<Button>,
             Without<BuildButton>,
             Without<SnapButton>,
+            Without<JobSlotButton>,
+        ),
+    >,
+    mut job_slot_buttons: Query<
+        (&Interaction, &JobSlotButton, &mut BackgroundColor),
+        (
+            Changed<Interaction>,
+            With<Button>,
+            Without<BuildButton>,
+            Without<SnapButton>,
+            Without<TimeButton>,
         ),
     >,
 ) {
@@ -282,6 +327,21 @@ pub fn handle_ui_buttons(
             Interaction::None => *color = BackgroundColor(BUTTON),
         }
     }
+
+    for (interaction, button, mut color) in &mut job_slot_buttons {
+        match *interaction {
+            Interaction::Pressed => {
+                if let Some(SelectedTarget::Building(entity)) = selection.selected
+                    && let Ok(mut workplace) = workplaces.get_mut(entity)
+                {
+                    workplace.adjust_desired_slots(button.0);
+                }
+                *color = BackgroundColor(BUTTON_ACTIVE);
+            }
+            Interaction::Hovered => *color = BackgroundColor(BUTTON_HOVER),
+            Interaction::None => *color = BackgroundColor(BUTTON),
+        }
+    }
 }
 
 pub fn update_ui_text(
@@ -298,6 +358,7 @@ pub fn update_ui_text(
         Option<&Inventory>,
         Option<&Housing>,
         Option<&CentralStorage>,
+        Option<&Workplace>,
     )>,
     farms: Query<(Entity, &CompletedFarmPlot, &Footprint)>,
     blueprints: Query<(Entity, &Blueprint, Option<&FarmPlot>, Option<&Footprint>)>,
@@ -310,13 +371,15 @@ pub fn update_ui_text(
         Query<&mut Text, With<SelectionBody>>,
         Query<&mut Text, With<TerrainDebugText>>,
         Query<&mut Text, With<FpsText>>,
+        Query<&mut Node, With<JobControlsRoot>>,
+        Query<&mut Text, With<JobSlotsText>>,
     )>,
 ) {
     let stock = public_stock(public_inventories.iter());
     let population = colonists.iter().count() as i32;
     let capacity: i32 = completed
         .iter()
-        .map(|(_, building, _, _, _)| building.kind.definition().population_capacity)
+        .map(|(_, building, _, _, _, _)| building.kind.definition().population_capacity)
         .sum();
     let homeless = colonists
         .iter()
@@ -331,11 +394,13 @@ pub fn update_ui_text(
 
     if let Ok(mut text) = text_queries.p0().single_mut() {
         text.0 = format!(
-            "{}: {}  {}: {}  Pop: {}/{}  Homeless: {}  Idle: {}  Time: {}",
+            "{}: {}  {}: {}  {}: {}  Pop: {}/{}  Homeless: {}  Idle: {}  Time: {}",
             ResourceKind::Wood.label(),
             stock.wood,
             ResourceKind::Food.label(),
             stock.food,
+            ResourceKind::Firewood.label(),
+            stock.firewood,
             population,
             capacity,
             homeless,
@@ -386,6 +451,21 @@ pub fn update_ui_text(
             .unwrap_or(0);
         text.0 = format!("FPS: {}", fps);
     }
+    let job_status = selected_job_status(&selection, &colonists, &completed);
+    if let Ok(mut node) = text_queries.p6().single_mut() {
+        node.display = if job_status.is_some() {
+            Display::Flex
+        } else {
+            Display::None
+        };
+    }
+    if let Ok(mut text) = text_queries.p7().single_mut() {
+        if let Some((assigned, desired)) = job_status {
+            text.0 = format!("Workers: {}/{}", assigned, desired);
+        } else {
+            text.0 = "Workers: 0/0".to_string();
+        }
+    }
 }
 
 fn resource_node_counts(resource_nodes: &Query<(Entity, &ResourceNode)>) -> (usize, usize) {
@@ -395,10 +475,41 @@ fn resource_node_counts(resource_nodes: &Query<(Entity, &ResourceNode)>) -> (usi
         match node.kind {
             ResourceKind::Wood => wood += 1,
             ResourceKind::Food => food += 1,
+            ResourceKind::Firewood => {}
         }
     }
 
     (wood, food)
+}
+
+fn selected_job_status(
+    selection: &SelectionState,
+    colonists: &Query<(Entity, &Colonist)>,
+    completed: &Query<(
+        Entity,
+        &CompletedBuilding,
+        Option<&Inventory>,
+        Option<&Housing>,
+        Option<&CentralStorage>,
+        Option<&Workplace>,
+    )>,
+) -> Option<(usize, u8)> {
+    let Some(SelectedTarget::Building(entity)) = selection.selected else {
+        return None;
+    };
+    let (_, _, _, _, _, workplace) = completed.get(entity).ok()?;
+    let workplace = workplace?;
+    Some((
+        assigned_worker_count(colonists, entity),
+        workplace.desired_slots,
+    ))
+}
+
+fn assigned_worker_count(colonists: &Query<(Entity, &Colonist)>, workplace: Entity) -> usize {
+    colonists
+        .iter()
+        .filter(|(_, colonist)| colonist.workplace == Some(workplace))
+        .count()
 }
 
 fn build_button(kind: ConstructionKind) -> impl Bundle {
@@ -432,6 +543,24 @@ fn time_button(label: &'static str, marker: TimeButton) -> impl Bundle {
     )
 }
 
+fn job_slot_button(label: &'static str, delta: i8) -> impl Bundle {
+    (
+        Button,
+        JobSlotButton(delta),
+        Node {
+            min_width: px(34),
+            height: px(30),
+            display: Display::Flex,
+            align_items: AlignItems::Center,
+            justify_content: JustifyContent::Center,
+            padding: UiRect::axes(px(8), px(4)),
+            ..default()
+        },
+        BackgroundColor(BUTTON),
+        children![(Text::new(label), TextColor(Color::WHITE))],
+    )
+}
+
 pub(crate) fn button_node() -> Node {
     Node {
         min_width: px(72),
@@ -453,6 +582,7 @@ fn selected_panel_text(
         Option<&Inventory>,
         Option<&Housing>,
         Option<&CentralStorage>,
+        Option<&Workplace>,
     )>,
     farms: &Query<(Entity, &CompletedFarmPlot, &Footprint)>,
     blueprints: &Query<(Entity, &Blueprint, Option<&FarmPlot>, Option<&Footprint>)>,
@@ -473,11 +603,17 @@ fn selected_panel_text(
                     .home
                     .map(|entity| format!("{entity:?}"))
                     .unwrap_or_else(|| "None".to_string());
+                let workplace = colonist
+                    .workplace
+                    .map(|entity| format!("{entity:?}"))
+                    .unwrap_or_else(|| "None".to_string());
                 (
                     colonist.name.clone(),
                     format!(
-                        "Status: {}\nSatiety: {:.0}/100\nHome: {}\nSpeed: {:.1}",
+                        "Status: {}\nProfession: {}\nWorkplace: {}\nSatiety: {:.0}/100\nHome: {}\nSpeed: {:.1}",
                         colonist.status_label(),
+                        colonist.profession.label(),
+                        workplace,
                         colonist.satiety,
                         home,
                         colonist.speed
@@ -489,18 +625,26 @@ fn selected_panel_text(
             .get(entity)
             .map(|(_, node)| {
                 let required_building = match node.kind {
-                    ResourceKind::Wood => BuildingKind::Woodcutter,
-                    ResourceKind::Food => BuildingKind::Gatherer,
+                    ResourceKind::Wood => Some(BuildingKind::Woodcutter),
+                    ResourceKind::Food => Some(BuildingKind::Gatherer),
+                    ResourceKind::Firewood => None,
                 };
-                let enabled = completed
-                    .iter()
-                    .any(|(_, building, _, _, _)| building.kind == required_building);
+                let enabled = required_building
+                    .map(|required_building| {
+                        completed
+                            .iter()
+                            .any(|(_, building, _, _, _, _)| building.kind == required_building)
+                    })
+                    .unwrap_or(false);
+                let used_by = required_building
+                    .map(|required_building| required_building.definition().label)
+                    .unwrap_or("Chopping Yard");
                 (
                     format!("{} node", node.kind.label()),
                     format!(
                         "Remaining: {}\nUsed by: {}\nReady to gather: {}",
                         node.amount,
-                        required_building.definition().label,
+                        used_by,
                         if enabled { "Yes" } else { "Needs building" }
                     ),
                 )
@@ -539,7 +683,7 @@ fn selected_panel_text(
             .unwrap_or_else(|_| missing_selection()),
         SelectedTarget::Building(entity) => completed
             .get(entity)
-            .map(|(_, building, inventory, housing, central)| {
+            .map(|(_, building, inventory, housing, central, workplace)| {
                 let definition = building.kind.definition();
                 let title = if central.is_some() {
                     "Central Storage".to_string()
@@ -560,11 +704,22 @@ fn selected_panel_text(
 
                 if let Some(inventory) = inventory {
                     body.push_str(&format!(
-                        "\nInventory: Wood {}  Food {}\nCapacity: {}/{}",
+                        "\nInventory: Wood {}  Food {}  Firewood {}\nCapacity: {}/{}",
                         inventory.wood,
                         inventory.food,
+                        inventory.firewood,
                         inventory.used_capacity(),
                         inventory.capacity
+                    ));
+                }
+
+                if let Some(workplace) = workplace {
+                    let assigned = assigned_worker_count(colonists, entity);
+                    body.push_str(&format!(
+                        "\nWorkers: {}/{}  Profession: {}",
+                        assigned,
+                        workplace.desired_slots,
+                        workplace.profession.label()
                     ));
                 }
 

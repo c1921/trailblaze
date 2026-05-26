@@ -208,6 +208,10 @@ fn select_resources(
     target_count: usize,
     resources: &mut Vec<GeneratedResource>,
 ) {
+    if target_count == 0 {
+        return;
+    }
+
     let mut candidates = resource_candidates(config, kind);
     candidates.sort_by(|left, right| candidate_quality_cmp(right, left));
 
@@ -289,6 +293,7 @@ fn resource_candidates(
                     }
                     forage * 0.76 + (1.0 - forest) * 0.14 + jitter * 0.1
                 }
+                ResourceKind::Firewood => 0.0,
             };
             push_candidate(
                 &mut candidates,
@@ -330,6 +335,7 @@ fn target_count_for_kind(config: &TerrainGenerationConfig, kind: ResourceKind) -
     match kind {
         ResourceKind::Wood => config.wood_nodes,
         ResourceKind::Food => config.food_nodes,
+        ResourceKind::Firewood => 0,
     }
 }
 
@@ -344,6 +350,7 @@ fn resource_amount(kind: ResourceKind) -> i32 {
     match kind {
         ResourceKind::Wood => WOOD_NODE_AMOUNT,
         ResourceKind::Food => FOOD_NODE_AMOUNT,
+        ResourceKind::Firewood => 0,
     }
 }
 
