@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 
-use crate::types::BUILDING_KINDS;
+use crate::types::{CONSTRUCTION_KINDS, ConstructionKind};
 
 use super::BuildState;
 
@@ -9,10 +9,9 @@ pub fn handle_build_hotkeys(
     mouse_buttons: Res<ButtonInput<MouseButton>>,
     mut build_state: ResMut<BuildState>,
 ) {
-    for kind in BUILDING_KINDS {
-        if keyboard.just_pressed(kind.hotkey()) {
-            build_state.selected = Some(kind);
-            build_state.status = format!("Planning {}.", kind.definition().label);
+    for construction in CONSTRUCTION_KINDS {
+        if keyboard.just_pressed(construction.hotkey()) {
+            build_state.select_construction(construction);
         }
     }
 
@@ -28,13 +27,25 @@ pub fn handle_build_hotkeys(
         );
     }
 
-    if keyboard.just_pressed(KeyCode::Escape)
-        || (build_state.selected.is_some() && mouse_buttons.just_pressed(MouseButton::Right))
+    if keyboard.just_pressed(KeyCode::Escape) {
+        build_state.cancel();
+    } else if build_state.selected == Some(ConstructionKind::Farm)
+        && mouse_buttons.just_pressed(MouseButton::Right)
     {
-        build_state.selected = None;
-        build_state.last_valid = false;
-        build_state.invalid_reason = None;
-        build_state.status = "Build mode cancelled.".to_string();
+        if build_state.farm_points.pop().is_some() {
+            build_state.last_valid = false;
+            build_state.invalid_reason = None;
+            build_state.status = if build_state.farm_points.is_empty() {
+                "Planning Farm. Click to place the first corner.".to_string()
+            } else {
+                format!(
+                    "Removed corner. Farm has {} corners.",
+                    build_state.farm_points.len()
+                )
+            };
+        }
+    } else if build_state.selected.is_some() && mouse_buttons.just_pressed(MouseButton::Right) {
+        build_state.cancel();
     }
 }
 
@@ -43,7 +54,11 @@ pub fn handle_rotation_input(
     time: Res<Time>,
     mut build_state: ResMut<BuildState>,
 ) {
-    if build_state.selected.is_none() {
+    if build_state
+        .selected
+        .and_then(ConstructionKind::as_building)
+        .is_none()
+    {
         return;
     }
 

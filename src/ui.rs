@@ -1,13 +1,14 @@
 use bevy::prelude::*;
 
 use crate::{
-    building::{Blueprint, BuildState, CompletedBuilding, Housing, WorldGeometry},
+    building::{Blueprint, BuildState, CompletedBuilding, Footprint, Housing, WorldGeometry},
     colonist::Colonist,
+    farm::{CompletedFarmPlot, FarmPlot},
     resources::{CentralStorage, Inventory, PublicInventory, public_stock},
     selection::{SelectedTarget, SelectionState},
     simulation::SimulationClock,
     terrain::TerrainGenerationConfig,
-    types::{BuildingKind, MAP_GRID_CELLS, ResourceKind},
+    types::{BuildingKind, CONSTRUCTION_KINDS, ConstructionKind, MAP_GRID_CELLS, ResourceKind},
     world::ResourceNode,
 };
 
@@ -48,19 +49,13 @@ impl Default for UiVisibility {
 #[derive(Component)]
 struct UiRoot;
 
-fn toggle_ui_visibility(
-    keyboard: Res<ButtonInput<KeyCode>>,
-    mut visibility: ResMut<UiVisibility>,
-) {
+fn toggle_ui_visibility(keyboard: Res<ButtonInput<KeyCode>>, mut visibility: ResMut<UiVisibility>) {
     if keyboard.just_pressed(KeyCode::F1) {
         visibility.visible = !visibility.visible;
     }
 }
 
-fn update_ui_visibility(
-    visibility: Res<UiVisibility>,
-    mut panels: Query<&mut Node, With<UiRoot>>,
-) {
+fn update_ui_visibility(visibility: Res<UiVisibility>, mut panels: Query<&mut Node, With<UiRoot>>) {
     if !visibility.is_changed() {
         return;
     }
@@ -89,7 +84,7 @@ pub struct SelectionTitle;
 pub struct SelectionBody;
 
 #[derive(Component)]
-pub struct BuildButton(pub BuildingKind);
+pub struct BuildButton(pub ConstructionKind);
 
 #[derive(Component)]
 pub enum TimeButton {
@@ -202,11 +197,12 @@ pub fn spawn_ui(mut commands: Commands) {
         },
         BackgroundColor(PANEL),
         children![
-            build_button(BuildingKind::House),
-            build_button(BuildingKind::Storage),
-            build_button(BuildingKind::Woodcutter),
-            build_button(BuildingKind::Gatherer),
-            build_button(BuildingKind::Road),
+            build_button(CONSTRUCTION_KINDS[0]),
+            build_button(CONSTRUCTION_KINDS[1]),
+            build_button(CONSTRUCTION_KINDS[2]),
+            build_button(CONSTRUCTION_KINDS[3]),
+            build_button(CONSTRUCTION_KINDS[4]),
+            build_button(CONSTRUCTION_KINDS[5]),
             utility_button("Snap G", SnapButton),
             time_button("Pause", TimeButton::Pause),
             time_button("1x", TimeButton::Speed(1.0)),
@@ -251,8 +247,7 @@ pub fn handle_ui_buttons(
     for (interaction, button, mut color) in &mut build_buttons {
         match *interaction {
             Interaction::Pressed => {
-                build_state.selected = Some(button.0);
-                build_state.status = format!("Planning {}.", button.0.definition().label);
+                build_state.select_construction(button.0);
                 *color = BackgroundColor(BUTTON_ACTIVE);
             }
             Interaction::Hovered => *color = BackgroundColor(BUTTON_HOVER),
@@ -304,7 +299,8 @@ pub fn update_ui_text(
         Option<&Housing>,
         Option<&CentralStorage>,
     )>,
-    blueprints: Query<(Entity, &Blueprint)>,
+    farms: Query<(Entity, &CompletedFarmPlot, &Footprint)>,
+    blueprints: Query<(Entity, &Blueprint, Option<&FarmPlot>, Option<&Footprint>)>,
     resource_nodes: Query<(Entity, &ResourceNode)>,
     public_inventories: Query<&Inventory, With<PublicInventory>>,
     mut text_queries: ParamSet<(
@@ -366,6 +362,7 @@ pub fn update_ui_text(
         &selection,
         &colonists,
         &completed,
+        &farms,
         &blueprints,
         &resource_nodes,
     );
@@ -404,9 +401,8 @@ fn resource_node_counts(resource_nodes: &Query<(Entity, &ResourceNode)>) -> (usi
     (wood, food)
 }
 
-fn build_button(kind: BuildingKind) -> impl Bundle {
-    let definition = kind.definition();
-    let label = format!("{} {}", hotkey_label(kind), definition.label);
+fn build_button(kind: ConstructionKind) -> impl Bundle {
+    let label = format!("{} {}", kind.hotkey_label(), kind.label());
     (
         Button,
         BuildButton(kind),
@@ -448,16 +444,6 @@ pub(crate) fn button_node() -> Node {
     }
 }
 
-fn hotkey_label(kind: BuildingKind) -> &'static str {
-    match kind {
-        BuildingKind::House => "1",
-        BuildingKind::Storage => "2",
-        BuildingKind::Woodcutter => "3",
-        BuildingKind::Gatherer => "4",
-        BuildingKind::Road => "5",
-    }
-}
-
 fn selected_panel_text(
     selection: &SelectionState,
     colonists: &Query<(Entity, &Colonist)>,
@@ -468,13 +454,14 @@ fn selected_panel_text(
         Option<&Housing>,
         Option<&CentralStorage>,
     )>,
-    blueprints: &Query<(Entity, &Blueprint)>,
+    farms: &Query<(Entity, &CompletedFarmPlot, &Footprint)>,
+    blueprints: &Query<(Entity, &Blueprint, Option<&FarmPlot>, Option<&Footprint>)>,
     resource_nodes: &Query<(Entity, &ResourceNode)>,
 ) -> (String, String) {
     let Some(selected) = selection.selected else {
         return (
             "Nothing selected".to_string(),
-            "Click a settler, building, blueprint, or resource node.".to_string(),
+            "Click a settler, building, farm, blueprint, or resource node.".to_string(),
         );
     };
 
@@ -521,23 +508,33 @@ fn selected_panel_text(
             .unwrap_or_else(|_| missing_selection()),
         SelectedTarget::Blueprint(entity) => blueprints
             .get(entity)
-            .map(|(_, blueprint)| {
-                let definition = blueprint.kind.definition();
-                (
-                    format!("{} blueprint", definition.label),
-                    format!(
-                        "Status: {}\nWood: {}/{}\nConstruction: {:.0}%\n{}",
-                        blueprint.status().label(),
-                        blueprint.delivered_wood,
-                        blueprint.required_wood,
-                        blueprint.progress_ratio() * 100.0,
-                        if blueprint.needs_wood() > 0 {
-                            "Settlers will deliver wood when stock is available."
-                        } else {
-                            "Waiting for a builder to finish construction."
-                        }
-                    ),
-                )
+            .map(|(_, blueprint, farm_plot, footprint)| {
+                let label = blueprint.kind.label();
+                let area_cells = farm_plot.map(|plot| plot.area_cells).or_else(|| {
+                    footprint.map(|footprint| {
+                        crate::building::polygon_area(&footprint.polygon)
+                            / crate::types::CELL_SIZE.powi(2)
+                    })
+                });
+                let material_line = if blueprint.kind == ConstructionKind::Farm {
+                    "No materials required."
+                } else if blueprint.needs_wood() > 0 {
+                    "Settlers will deliver wood when stock is available."
+                } else {
+                    "Waiting for a builder to finish construction."
+                };
+                let mut body = format!(
+                    "Status: {}\nWood: {}/{}\nConstruction: {:.0}%\n{}",
+                    blueprint.status().label(),
+                    blueprint.delivered_wood,
+                    blueprint.required_wood,
+                    blueprint.progress_ratio() * 100.0,
+                    material_line
+                );
+                if let Some(area_cells) = area_cells {
+                    body.push_str(&format!("\nArea: {:.1} cells", area_cells));
+                }
+                (format!("{} blueprint", label), body)
             })
             .unwrap_or_else(|_| missing_selection()),
         SelectedTarget::Building(entity) => completed
@@ -572,6 +569,19 @@ fn selected_panel_text(
                 }
 
                 (title, body)
+            })
+            .unwrap_or_else(|_| missing_selection()),
+        SelectedTarget::Farm(entity) => farms
+            .get(entity)
+            .map(|(_, farm, _)| {
+                (
+                    "Farm plot".to_string(),
+                    format!(
+                        "{}\nStatus: Built\nArea: {:.1} cells",
+                        ConstructionKind::Farm.description(),
+                        farm.area_cells
+                    ),
+                )
             })
             .unwrap_or_else(|_| missing_selection()),
     }

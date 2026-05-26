@@ -36,12 +36,19 @@ pub enum BuildingKind {
     Road,
 }
 
-pub const BUILDING_KINDS: [BuildingKind; 5] = [
-    BuildingKind::House,
-    BuildingKind::Storage,
-    BuildingKind::Woodcutter,
-    BuildingKind::Gatherer,
-    BuildingKind::Road,
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum ConstructionKind {
+    Building(BuildingKind),
+    Farm,
+}
+
+pub const CONSTRUCTION_KINDS: [ConstructionKind; 6] = [
+    ConstructionKind::Building(BuildingKind::House),
+    ConstructionKind::Building(BuildingKind::Storage),
+    ConstructionKind::Building(BuildingKind::Woodcutter),
+    ConstructionKind::Building(BuildingKind::Gatherer),
+    ConstructionKind::Building(BuildingKind::Road),
+    ConstructionKind::Farm,
 ];
 
 #[derive(Clone, Copy, Debug)]
@@ -124,6 +131,47 @@ impl BuildingKind {
         match self {
             Self::Road => None,
             _ => Some(IVec2::NEG_Y),
+        }
+    }
+}
+
+impl ConstructionKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Building(kind) => kind.definition().label,
+            Self::Farm => "Farm",
+        }
+    }
+
+    pub fn hotkey(self) -> KeyCode {
+        match self {
+            Self::Building(kind) => kind.hotkey(),
+            Self::Farm => KeyCode::Digit6,
+        }
+    }
+
+    pub fn hotkey_label(self) -> &'static str {
+        match self {
+            Self::Building(BuildingKind::House) => "1",
+            Self::Building(BuildingKind::Storage) => "2",
+            Self::Building(BuildingKind::Woodcutter) => "3",
+            Self::Building(BuildingKind::Gatherer) => "4",
+            Self::Building(BuildingKind::Road) => "5",
+            Self::Farm => "6",
+        }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Building(kind) => kind.description(),
+            Self::Farm => "Designates a prepared soil plot for future planting.",
+        }
+    }
+
+    pub fn as_building(self) -> Option<BuildingKind> {
+        match self {
+            Self::Building(kind) => Some(kind),
+            Self::Farm => None,
         }
     }
 }

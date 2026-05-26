@@ -1,8 +1,9 @@
 use bevy::prelude::*;
 
 use crate::{
+    farm::{CompletedFarmPlot, FarmPlot, FarmVisual, farm_surface_mesh},
     resources::{HOUSE_FOOD_CAPACITY, Inventory, PublicInventory, STORAGE_CAPACITY},
-    types::{BuildingKind, ResourceKind},
+    types::{BuildingKind, ConstructionKind, ResourceKind},
     world::GameAssets,
 };
 
@@ -21,7 +22,10 @@ pub fn update_blueprint_visuals(
         let Ok(blueprint) = blueprints.get(visual.owner) else {
             continue;
         };
-        let height = blueprint.kind.definition().height;
+        let Some(kind) = blueprint.kind.as_building() else {
+            continue;
+        };
+        let height = kind.definition().height;
         let visual_height = (height * (0.35 + blueprint.progress_ratio() * 0.65)).max(0.04);
         transform.scale.y = visual_height;
         transform.translation.y = visual_height * 0.5;
@@ -31,42 +35,57 @@ pub fn update_blueprint_visuals(
 pub fn finish_blueprints(
     mut commands: Commands,
     assets: Option<Res<GameAssets>>,
-    blueprint_query: Query<(Entity, &Blueprint, Option<&Footprint>)>,
-    mut visuals: Query<(&BuildingVisual, &mut MeshMaterial3d<StandardMaterial>)>,
+    blueprint_query: Query<(Entity, &Blueprint, Option<&Footprint>, Option<&FarmPlot>)>,
+    mut visuals: Query<(&BuildingVisual, &mut MeshMaterial3d<StandardMaterial>), Without<FarmVisual>>,
+    mut farm_visuals: Query<(&FarmVisual, &mut MeshMaterial3d<StandardMaterial>), Without<BuildingVisual>>,
 ) {
     let Some(assets) = assets else {
         return;
     };
 
-    for (entity, blueprint, footprint) in &blueprint_query {
+    for (entity, blueprint, footprint, farm_plot) in &blueprint_query {
         if !blueprint.is_complete() {
             continue;
         }
 
-        for (visual, mut material) in &mut visuals {
-            if visual.owner == entity {
-                material.0 = assets.building_material(blueprint.kind);
-                break;
-            }
-        }
         let mut entity_commands = commands.entity(entity);
         entity_commands.remove::<Blueprint>();
-        entity_commands.insert(CompletedBuilding {
-            kind: blueprint.kind,
-        });
+
         match blueprint.kind {
-            BuildingKind::House => {
-                entity_commands.insert((
-                    Inventory::home_food(HOUSE_FOOD_CAPACITY),
-                    Housing::default(),
-                ));
+            ConstructionKind::Building(kind) => {
+                for (visual, mut material) in &mut visuals {
+                    if visual.owner == entity {
+                        material.0 = assets.building_material(kind);
+                        break;
+                    }
+                }
+                entity_commands.insert(CompletedBuilding { kind });
+                match kind {
+                    BuildingKind::House => {
+                        entity_commands.insert((
+                            Inventory::home_food(HOUSE_FOOD_CAPACITY),
+                            Housing::default(),
+                        ));
+                    }
+                    BuildingKind::Storage => {
+                        let mut inventory = Inventory::public(STORAGE_CAPACITY);
+                        inventory.add(ResourceKind::Wood, 4);
+                        entity_commands.insert((inventory, PublicInventory));
+                    }
+                    BuildingKind::Woodcutter | BuildingKind::Gatherer | BuildingKind::Road => {}
+                }
             }
-            BuildingKind::Storage => {
-                let mut inventory = Inventory::public(STORAGE_CAPACITY);
-                inventory.add(ResourceKind::Wood, 4);
-                entity_commands.insert((inventory, PublicInventory));
+            ConstructionKind::Farm => {
+                for (visual, mut material) in &mut farm_visuals {
+                    if visual.owner == entity {
+                        material.0 = assets.farm_soil_material.clone();
+                        break;
+                    }
+                }
+                entity_commands.insert(CompletedFarmPlot {
+                    area_cells: farm_plot.map(|plot| plot.area_cells).unwrap_or(0.0),
+                });
             }
-            BuildingKind::Woodcutter | BuildingKind::Gatherer | BuildingKind::Road => {}
         }
         if let Some(footprint) = footprint {
             entity_commands.insert(Footprint {
@@ -96,12 +115,13 @@ pub(super) fn sync_building_visual(
     scale: Vec3,
     height: f32,
     visuals: &mut Query<(
+        Entity,
         &BuildingVisual,
         &mut Transform,
         &mut MeshMaterial3d<StandardMaterial>,
-    )>,
+    ), Without<FarmVisual>>,
 ) {
-    for (visual, mut transform, mut visual_material) in visuals.iter_mut() {
+    for (_, visual, mut transform, mut visual_material) in visuals.iter_mut() {
         if visual.owner == owner {
             transform.translation = visual_translation(height);
             transform.scale = scale;
@@ -111,6 +131,74 @@ pub(super) fn sync_building_visual(
     }
 
     spawn_building_visual(commands, assets, owner, material, scale, height);
+}
+
+pub(super) fn sync_farm_visual(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    owner: Entity,
+    seed: u64,
+    polygon: &[Vec2],
+    material: Handle<StandardMaterial>,
+    visuals: &mut Query<(
+        Entity,
+        &FarmVisual,
+        &mut Mesh3d,
+        &mut MeshMaterial3d<StandardMaterial>,
+    ), Without<BuildingVisual>>,
+) {
+    let origin = crate::farm::farm_origin(seed, polygon);
+    let mesh = meshes.add(farm_surface_mesh(seed, polygon, origin));
+    for (_, visual, mut mesh_handle, mut visual_material) in visuals.iter_mut() {
+        if visual.owner == owner {
+            mesh_handle.0 = mesh;
+            visual_material.0 = material;
+            return;
+        }
+    }
+
+    commands.spawn((
+        Mesh3d(mesh),
+        MeshMaterial3d(material),
+        Transform::default(),
+        Visibility::Visible,
+        FarmVisual { owner },
+        ChildOf(owner),
+    ));
+}
+
+pub(super) fn despawn_building_visual(
+    commands: &mut Commands,
+    owner: Entity,
+    visuals: &mut Query<(
+        Entity,
+        &BuildingVisual,
+        &mut Transform,
+        &mut MeshMaterial3d<StandardMaterial>,
+    ), Without<FarmVisual>>,
+) {
+    for (entity, visual, _, _) in visuals.iter_mut() {
+        if visual.owner == owner {
+            commands.entity(entity).despawn();
+        }
+    }
+}
+
+pub(super) fn despawn_farm_visual(
+    commands: &mut Commands,
+    owner: Entity,
+    visuals: &mut Query<(
+        Entity,
+        &FarmVisual,
+        &mut Mesh3d,
+        &mut MeshMaterial3d<StandardMaterial>,
+    ), Without<BuildingVisual>>,
+) {
+    for (entity, visual, _, _) in visuals.iter_mut() {
+        if visual.owner == owner {
+            commands.entity(entity).despawn();
+        }
+    }
 }
 
 pub(super) fn spawn_building_visual(

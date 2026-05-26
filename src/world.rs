@@ -50,6 +50,8 @@ pub struct GameAssets {
     pub gatherer_material: Handle<StandardMaterial>,
     pub road_material: Handle<StandardMaterial>,
     pub entrance_material: Handle<StandardMaterial>,
+    pub farm_blueprint_material: Handle<StandardMaterial>,
+    pub farm_soil_material: Handle<StandardMaterial>,
     pub colonist_mesh: Handle<Mesh>,
     pub colonist_material: Handle<StandardMaterial>,
 }
@@ -100,6 +102,17 @@ pub fn setup_scene(
         alpha_mode: AlphaMode::Blend,
         ..default()
     });
+    let farm_blueprint_material = materials.add(StandardMaterial {
+        base_color: Color::srgba(0.42, 0.25, 0.12, 0.58),
+        alpha_mode: AlphaMode::Blend,
+        perceptual_roughness: 0.95,
+        ..default()
+    });
+    let farm_soil_material = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.34, 0.22, 0.12),
+        perceptual_roughness: 0.95,
+        ..default()
+    });
 
     let assets = GameAssets {
         cube_mesh: cube_mesh.clone(),
@@ -112,6 +125,8 @@ pub fn setup_scene(
         gatherer_material: materials.add(building_color(BuildingKind::Gatherer)),
         road_material: materials.add(building_color(BuildingKind::Road)),
         entrance_material: materials.add(Color::srgb(0.95, 0.86, 0.28)),
+        farm_blueprint_material,
+        farm_soil_material,
         colonist_mesh: colonist_mesh.clone(),
         colonist_material: colonist_material.clone(),
     };

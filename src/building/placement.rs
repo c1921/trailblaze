@@ -1,16 +1,22 @@
 use bevy::{prelude::*, window::PrimaryWindow};
 
 use crate::{
+    farm::{
+        FARM_CLOSE_DISTANCE, FarmPlot, FarmVisual, farm_access_point, farm_area_cells,
+        farm_build_seconds, farm_origin, validate_farm_plan,
+    },
     math::{ray_terrain_intersection, terrain_pick_max_distance},
     terrain::{TerrainGenerationConfig, terrain_height},
     types::{
-        BuildingKind, CELL_SIZE, entrance_local_offset, entrance_world_position, snap_to_grid,
+        BuildingKind, CELL_SIZE, ConstructionKind, entrance_local_offset, entrance_world_position,
+        snap_to_grid,
     },
     world::GameAssets,
 };
 
 use super::lifecycle::{
-    spawn_building_visual, spawn_entrance_marker, spawn_entrance_preview, sync_building_visual,
+    despawn_building_visual, despawn_farm_visual, spawn_building_visual, spawn_entrance_marker,
+    spawn_entrance_preview, sync_building_visual, sync_farm_visual,
 };
 use super::polygon::{FOOTPRINT_SCALE, ROAD_FOOTPRINT_SCALE};
 use super::{
@@ -23,24 +29,33 @@ pub fn update_build_preview(
     windows: Query<&Window, With<PrimaryWindow>>,
     camera_query: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
     assets: Option<Res<GameAssets>>,
+    mut meshes: ResMut<Assets<Mesh>>,
     geometry: Res<WorldGeometry>,
     terrain_config: Res<TerrainGenerationConfig>,
     mut build_state: ResMut<BuildState>,
+    mut gizmos: Gizmos,
     mut preview_query: Query<
         (Entity, &mut Transform, &mut Visibility),
         (With<BuildPreview>, Without<BuildingVisual>),
     >,
     mut visual_query: Query<(
+        Entity,
         &BuildingVisual,
         &mut Transform,
         &mut MeshMaterial3d<StandardMaterial>,
-    )>,
+    ), Without<FarmVisual>>,
+    mut farm_visual_query: Query<(
+        Entity,
+        &FarmVisual,
+        &mut Mesh3d,
+        &mut MeshMaterial3d<StandardMaterial>,
+    ), Without<BuildingVisual>>,
 ) {
     let Some(assets) = assets else {
         return;
     };
 
-    let Some(kind) = build_state.selected else {
+    let Some(construction) = build_state.selected else {
         hide_preview(&mut build_state, &mut preview_query);
         hide_entrance_preview(&mut commands, &mut build_state);
         return;
@@ -53,6 +68,27 @@ pub fn update_build_preview(
         return;
     };
 
+    if construction == ConstructionKind::Farm {
+        update_farm_preview(
+            &mut commands,
+            &assets,
+            &mut meshes,
+            &geometry,
+            terrain_config.seed,
+            terrain_config.max_buildable_slope,
+            cursor_world,
+            &mut build_state,
+            &mut gizmos,
+            &mut preview_query,
+            &mut visual_query,
+            &mut farm_visual_query,
+        );
+        return;
+    }
+
+    let Some(kind) = construction.as_building() else {
+        return;
+    };
     let definition = kind.definition();
     let position = if build_state.snap_to_grid {
         snap_to_grid(cursor_world)
@@ -143,6 +179,7 @@ pub fn update_build_preview(
         entity
     };
 
+    despawn_farm_visual(&mut commands, preview_entity, &mut farm_visual_query);
     sync_building_visual(
         &mut commands,
         &assets,
@@ -156,8 +193,12 @@ pub fn update_build_preview(
     hide_entrance_preview(&mut commands, &mut build_state);
     if valid && kind != BuildingKind::Road {
         if let Some(entrance) = entrance {
-            let ent_entity =
-                spawn_entrance_preview(&mut commands, &assets, preview_entity, entrance.local_offset);
+            let ent_entity = spawn_entrance_preview(
+                &mut commands,
+                &assets,
+                preview_entity,
+                entrance.local_offset,
+            );
             build_state.preview_entrance_entity = Some(ent_entity);
         }
     }
@@ -165,13 +206,49 @@ pub fn update_build_preview(
 
 pub fn place_blueprint(
     mut commands: Commands,
+    keyboard: Res<ButtonInput<KeyCode>>,
     mouse_buttons: Res<ButtonInput<MouseButton>>,
     button_interactions: Query<&Interaction, With<Button>>,
     assets: Option<Res<GameAssets>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    camera_query: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
     terrain_config: Res<TerrainGenerationConfig>,
     mut geometry: ResMut<WorldGeometry>,
     mut build_state: ResMut<BuildState>,
+    mut farm_visual_query: Query<(
+        Entity,
+        &FarmVisual,
+        &mut Mesh3d,
+        &mut MeshMaterial3d<StandardMaterial>,
+    ), Without<BuildingVisual>>,
 ) {
+    let Some(assets) = assets else {
+        return;
+    };
+    let Some(construction) = build_state.selected else {
+        return;
+    };
+
+    if construction == ConstructionKind::Farm {
+        handle_farm_clicks(
+            &mut commands,
+            &keyboard,
+            &mouse_buttons,
+            &button_interactions,
+            &assets,
+            &mut meshes,
+            &windows,
+            &camera_query,
+            terrain_config.seed,
+            terrain_config.max_buildable_slope,
+            &mut geometry,
+            &mut build_state,
+            &mut farm_visual_query,
+        );
+        return;
+    }
+
     if !mouse_buttons.just_pressed(MouseButton::Left) || !build_state.last_valid {
         return;
     }
@@ -182,13 +259,9 @@ pub fn place_blueprint(
         return;
     }
 
-    let Some(assets) = assets else {
+    let Some(kind) = construction.as_building() else {
         return;
     };
-    let Some(kind) = build_state.selected else {
-        return;
-    };
-
     let definition = kind.definition();
     let scale = preview_scale(kind, definition.size, definition.height);
     let rotation = Quat::from_rotation_y(build_state.rotation_angle);
@@ -222,7 +295,7 @@ pub fn place_blueprint(
             },
             Visibility::Visible,
             Blueprint {
-                kind,
+                kind: ConstructionKind::Building(kind),
                 required_wood: definition.wood_cost,
                 delivered_wood: 0,
                 progress: 0.0,
@@ -258,6 +331,370 @@ pub fn place_blueprint(
     build_state.invalid_reason = None;
 }
 
+fn update_farm_preview(
+    commands: &mut Commands,
+    assets: &GameAssets,
+    meshes: &mut Assets<Mesh>,
+    geometry: &WorldGeometry,
+    seed: u64,
+    max_slope: f32,
+    cursor_world: Vec3,
+    build_state: &mut BuildState,
+    gizmos: &mut Gizmos,
+    preview_query: &mut Query<
+        (Entity, &mut Transform, &mut Visibility),
+        (With<BuildPreview>, Without<BuildingVisual>),
+    >,
+    building_visuals: &mut Query<(
+        Entity,
+        &BuildingVisual,
+        &mut Transform,
+        &mut MeshMaterial3d<StandardMaterial>,
+    ), Without<FarmVisual>>,
+    farm_visuals: &mut Query<(
+        Entity,
+        &FarmVisual,
+        &mut Mesh3d,
+        &mut MeshMaterial3d<StandardMaterial>,
+    ), Without<BuildingVisual>>,
+) {
+    hide_entrance_preview(commands, build_state);
+
+    let cursor_point = planned_farm_point(cursor_world, build_state.snap_to_grid);
+    draw_farm_draft_gizmos(gizmos, seed, &build_state.farm_points, Some(cursor_point));
+
+    let committed_access = farm_access_point(seed, &build_state.farm_points);
+    let committed_issue = validate_farm_plan(
+        geometry,
+        &build_state.farm_points,
+        committed_access,
+        seed,
+        max_slope,
+    );
+    build_state.last_valid = build_state.farm_points.len() >= 3 && committed_issue.is_none();
+    build_state.invalid_reason = committed_issue;
+    build_state.last_polygon = build_state.farm_points.clone();
+    build_state.last_access_point = committed_access;
+
+    let mut draft_polygon = build_state.farm_points.clone();
+    if draft_polygon.len() < 3 || !cursor_closes_farm(&draft_polygon, cursor_point) {
+        if draft_polygon
+            .last()
+            .map(|point| point.distance(cursor_point) > 0.05)
+            .unwrap_or(true)
+        {
+            draft_polygon.push(cursor_point);
+        }
+    }
+
+    build_state.status = farm_status(build_state, committed_issue);
+    if draft_polygon.len() < 3 {
+        hide_preview(build_state, preview_query);
+        return;
+    }
+
+    let draft_access = farm_access_point(seed, &draft_polygon);
+    let draft_valid =
+        validate_farm_plan(geometry, &draft_polygon, draft_access, seed, max_slope).is_none();
+    let origin = farm_origin(seed, &draft_polygon);
+    build_state.last_position = origin;
+    let material = if draft_valid {
+        assets.preview_valid_material.clone()
+    } else {
+        assets.preview_invalid_material.clone()
+    };
+
+    let preview_entity = ensure_preview_entity(commands, build_state, preview_query, origin);
+    despawn_building_visual(commands, preview_entity, building_visuals);
+    sync_farm_visual(
+        commands,
+        meshes,
+        preview_entity,
+        seed,
+        &draft_polygon,
+        material,
+        farm_visuals,
+    );
+}
+
+fn handle_farm_clicks(
+    commands: &mut Commands,
+    keyboard: &ButtonInput<KeyCode>,
+    mouse_buttons: &ButtonInput<MouseButton>,
+    button_interactions: &Query<&Interaction, With<Button>>,
+    assets: &GameAssets,
+    meshes: &mut Assets<Mesh>,
+    windows: &Query<&Window, With<PrimaryWindow>>,
+    camera_query: &Query<(&Camera, &GlobalTransform), With<Camera3d>>,
+    seed: u64,
+    max_slope: f32,
+    geometry: &mut WorldGeometry,
+    build_state: &mut BuildState,
+    farm_visuals: &mut Query<(
+        Entity,
+        &FarmVisual,
+        &mut Mesh3d,
+        &mut MeshMaterial3d<StandardMaterial>,
+    ), Without<BuildingVisual>>,
+) {
+    let finish_key =
+        keyboard.just_pressed(KeyCode::Enter) || keyboard.just_pressed(KeyCode::NumpadEnter);
+    let left_click = mouse_buttons.just_pressed(MouseButton::Left);
+    if !left_click && !finish_key {
+        return;
+    }
+    if left_click
+        && button_interactions
+            .iter()
+            .any(|interaction| *interaction != Interaction::None)
+    {
+        return;
+    }
+
+    if left_click {
+        let Some(cursor_world) = cursor_ground_position(windows, camera_query, seed) else {
+            return;
+        };
+        let point = planned_farm_point(cursor_world, build_state.snap_to_grid);
+        if cursor_closes_farm(&build_state.farm_points, point) {
+            place_farm_blueprint(
+                commands,
+                assets,
+                meshes,
+                seed,
+                max_slope,
+                geometry,
+                build_state,
+                farm_visuals,
+            );
+            return;
+        }
+
+        if build_state
+            .farm_points
+            .iter()
+            .any(|existing| existing.distance(point) <= 0.05)
+        {
+            build_state.status = "Farm corner already exists.".to_string();
+            return;
+        }
+
+        build_state.farm_points.push(point);
+        build_state.last_valid = false;
+        build_state.invalid_reason = None;
+        build_state.status = format!(
+            "Farm has {} corners. Add corners or press Enter to close.",
+            build_state.farm_points.len()
+        );
+        return;
+    }
+
+    if finish_key {
+        place_farm_blueprint(
+            commands,
+            assets,
+            meshes,
+            seed,
+            max_slope,
+            geometry,
+            build_state,
+            farm_visuals,
+        );
+    }
+}
+
+fn place_farm_blueprint(
+    commands: &mut Commands,
+    assets: &GameAssets,
+    meshes: &mut Assets<Mesh>,
+    seed: u64,
+    max_slope: f32,
+    geometry: &mut WorldGeometry,
+    build_state: &mut BuildState,
+    farm_visuals: &mut Query<(
+        Entity,
+        &FarmVisual,
+        &mut Mesh3d,
+        &mut MeshMaterial3d<StandardMaterial>,
+    ), Without<BuildingVisual>>,
+) {
+    let polygon = build_state.farm_points.clone();
+    let access = farm_access_point(seed, &polygon);
+    if let Some(issue) = validate_farm_plan(geometry, &polygon, access, seed, max_slope) {
+        build_state.status = format!("Cannot place Farm: {}.", issue.label());
+        build_state.last_valid = false;
+        build_state.invalid_reason = Some(issue);
+        return;
+    }
+
+    let access = access.expect("validated farm plan should have an access point");
+    let origin = farm_origin(seed, &polygon);
+    let area_cells = farm_area_cells(&polygon);
+    let build_seconds = farm_build_seconds(&polygon);
+    let entity = commands
+        .spawn((
+            Transform {
+                translation: origin,
+                rotation: Quat::IDENTITY,
+                scale: Vec3::ONE,
+            },
+            Visibility::Visible,
+            Blueprint {
+                kind: ConstructionKind::Farm,
+                required_wood: 0,
+                delivered_wood: 0,
+                progress: 0.0,
+                build_seconds,
+            },
+            Footprint {
+                polygon: polygon.clone(),
+                passable: false,
+            },
+            FarmPlot { area_cells },
+            BuildingEntrance {
+                world_position: access,
+                local_offset: access - origin,
+            },
+        ))
+        .id();
+
+    sync_farm_visual(
+        commands,
+        meshes,
+        entity,
+        seed,
+        &polygon,
+        assets.farm_blueprint_material.clone(),
+        farm_visuals,
+    );
+
+    geometry.occupy_polygon(polygon, entity, false);
+    geometry.reserve_entrance_point(access, entity);
+    build_state.farm_points.clear();
+    build_state.last_valid = false;
+    build_state.invalid_reason = None;
+    build_state.last_polygon.clear();
+    build_state.last_access_point = None;
+    build_state.last_position = origin;
+    build_state.status = format!("Placed Farm blueprint. Area: {:.1} cells.", area_cells);
+}
+
+fn ensure_preview_entity(
+    commands: &mut Commands,
+    build_state: &mut BuildState,
+    preview_query: &mut Query<
+        (Entity, &mut Transform, &mut Visibility),
+        (With<BuildPreview>, Without<BuildingVisual>),
+    >,
+    position: Vec3,
+) -> Entity {
+    if let Some(entity) = build_state.preview_entity {
+        if let Ok((_, mut transform, mut visibility)) = preview_query.get_mut(entity) {
+            transform.translation = position;
+            transform.rotation = Quat::IDENTITY;
+            transform.scale = Vec3::ONE;
+            *visibility = Visibility::Visible;
+            return entity;
+        }
+    }
+
+    let entity = commands
+        .spawn((
+            Transform {
+                translation: position,
+                rotation: Quat::IDENTITY,
+                scale: Vec3::ONE,
+            },
+            Visibility::Visible,
+            BuildPreview,
+        ))
+        .id();
+    build_state.preview_entity = Some(entity);
+    entity
+}
+
+fn planned_farm_point(cursor_world: Vec3, snap: bool) -> Vec2 {
+    let position = if snap {
+        snap_to_grid(cursor_world)
+    } else {
+        cursor_world
+    };
+    Vec2::new(position.x, position.z)
+}
+
+fn cursor_closes_farm(points: &[Vec2], point: Vec2) -> bool {
+    points.len() >= 3
+        && points
+            .first()
+            .map(|first| first.distance(point) <= FARM_CLOSE_DISTANCE)
+            .unwrap_or(false)
+}
+
+fn farm_status(build_state: &BuildState, issue: Option<PlacementIssue>) -> String {
+    match build_state.farm_points.len() {
+        0 => "Planning Farm. Click to place the first corner.".to_string(),
+        1 => "Planning Farm. Add at least two more corners.".to_string(),
+        2 => "Planning Farm. Add at least one more corner.".to_string(),
+        _ if issue.is_none() => {
+            "Farm outline ready. Click the first corner or press Enter to place blueprint."
+                .to_string()
+        }
+        _ => format!(
+            "Cannot close Farm: {}.",
+            issue
+                .map(PlacementIssue::label)
+                .unwrap_or("invalid outline")
+        ),
+    }
+}
+
+fn draw_farm_draft_gizmos(
+    gizmos: &mut Gizmos,
+    seed: u64,
+    points: &[Vec2],
+    cursor_point: Option<Vec2>,
+) {
+    let color = LinearRgba::rgb(0.95, 0.78, 0.28);
+    for (index, point) in points.iter().enumerate() {
+        let position = farm_gizmo_position(seed, *point);
+        gizmos.circle(
+            Isometry3d::new(position, Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
+            if index == 0 { 0.18 } else { 0.12 },
+            color,
+        );
+        if let Some(next) = points.get(index + 1) {
+            gizmos.line(position, farm_gizmo_position(seed, *next), color);
+        }
+    }
+
+    if let (Some(last), Some(cursor)) = (points.last(), cursor_point) {
+        gizmos.line(
+            farm_gizmo_position(seed, *last),
+            farm_gizmo_position(seed, cursor),
+            color,
+        );
+    }
+    if points.len() >= 3 {
+        if let (Some(first), Some(cursor)) = (points.first(), cursor_point) {
+            if cursor_closes_farm(points, cursor) {
+                gizmos.line(
+                    farm_gizmo_position(seed, cursor),
+                    farm_gizmo_position(seed, *first),
+                    color,
+                );
+            }
+        }
+    }
+}
+
+fn farm_gizmo_position(seed: u64, point: Vec2) -> Vec3 {
+    Vec3::new(
+        point.x,
+        terrain_height(seed, point.x, point.y) + 0.12,
+        point.y,
+    )
+}
+
 fn hide_preview(
     build_state: &mut BuildState,
     preview_query: &mut Query<
@@ -267,6 +704,7 @@ fn hide_preview(
 ) {
     build_state.invalid_reason = None;
     build_state.last_valid = false;
+    build_state.last_access_point = None;
     if let Some(entity) = build_state.preview_entity {
         if let Ok((_, _, mut visibility)) = preview_query.get_mut(entity) {
             *visibility = Visibility::Hidden;
@@ -297,7 +735,11 @@ fn cursor_ground_position(
 
 fn preview_scale(kind: BuildingKind, size: IVec2, height: f32) -> Vec3 {
     if kind == BuildingKind::Road {
-        Vec3::new(CELL_SIZE * ROAD_FOOTPRINT_SCALE, height, CELL_SIZE * ROAD_FOOTPRINT_SCALE)
+        Vec3::new(
+            CELL_SIZE * ROAD_FOOTPRINT_SCALE,
+            height,
+            CELL_SIZE * ROAD_FOOTPRINT_SCALE,
+        )
     } else {
         Vec3::new(
             size.x as f32 * CELL_SIZE * FOOTPRINT_SCALE,

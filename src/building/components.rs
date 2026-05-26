@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 
-use crate::types::BuildingKind;
+use crate::types::{BuildingKind, ConstructionKind};
 
 #[derive(Component)]
 pub struct BuildPreview;
@@ -21,7 +21,7 @@ pub struct Footprint {
 
 #[derive(Component, Debug)]
 pub struct Blueprint {
-    pub kind: BuildingKind,
+    pub kind: ConstructionKind,
     pub required_wood: i32,
     pub delivered_wood: i32,
     pub progress: f32,
@@ -134,7 +134,7 @@ mod tests {
     #[test]
     fn blueprint_waits_for_materials_before_completion() {
         let mut blueprint = Blueprint {
-            kind: BuildingKind::House,
+            kind: ConstructionKind::Building(BuildingKind::House),
             required_wood: 4,
             delivered_wood: 3,
             progress: 99.0,
@@ -149,7 +149,7 @@ mod tests {
     #[test]
     fn blueprint_status_tracks_materials_and_work() {
         let mut blueprint = Blueprint {
-            kind: BuildingKind::House,
+            kind: ConstructionKind::Building(BuildingKind::House),
             required_wood: 4,
             delivered_wood: 0,
             progress: 0.0,

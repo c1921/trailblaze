@@ -2,6 +2,7 @@ mod building;
 mod camera;
 mod colonist;
 mod debug_console;
+mod farm;
 mod math;
 mod navigation;
 mod resources;
@@ -35,7 +36,9 @@ fn main() {
     }
 
     app.add_plugins(DefaultPlugins)
-        .add_plugins(WireframePlugin { debug_flags: RenderDebugFlags::empty() })
+        .add_plugins(WireframePlugin {
+            debug_flags: RenderDebugFlags::empty(),
+        })
         .add_plugins(bevy::diagnostic::FrameTimeDiagnosticsPlugin::default())
         .add_plugins((
             simulation::SimulationPlugin,

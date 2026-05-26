@@ -1,10 +1,10 @@
 use bevy::prelude::*;
 
-use crate::types::BuildingKind;
+use crate::types::ConstructionKind;
 
 #[derive(Resource, Debug)]
 pub struct BuildState {
-    pub selected: Option<BuildingKind>,
+    pub selected: Option<ConstructionKind>,
     pub snap_to_grid: bool,
     pub rotation_angle: f32,
     pub r_hold_timer: f32,
@@ -13,6 +13,8 @@ pub struct BuildState {
     pub last_valid: bool,
     pub last_position: Vec3,
     pub last_polygon: Vec<Vec2>,
+    pub last_access_point: Option<Vec3>,
+    pub farm_points: Vec<Vec2>,
     pub invalid_reason: Option<PlacementIssue>,
     pub status: String,
 }
@@ -29,9 +31,38 @@ impl Default for BuildState {
             last_valid: false,
             last_position: Vec3::ZERO,
             last_polygon: Vec::new(),
+            last_access_point: None,
+            farm_points: Vec::new(),
             invalid_reason: None,
             status: "Select a building to start planning.".to_string(),
         }
+    }
+}
+
+impl BuildState {
+    pub fn select_construction(&mut self, construction: ConstructionKind) {
+        self.selected = Some(construction);
+        self.last_valid = false;
+        self.last_polygon.clear();
+        self.last_access_point = None;
+        self.invalid_reason = None;
+        self.farm_points.clear();
+        self.status = match construction {
+            ConstructionKind::Building(kind) => {
+                format!("Planning {}.", kind.definition().label)
+            }
+            ConstructionKind::Farm => "Planning Farm. Click to place the first corner.".to_string(),
+        };
+    }
+
+    pub fn cancel(&mut self) {
+        self.selected = None;
+        self.last_valid = false;
+        self.last_polygon.clear();
+        self.last_access_point = None;
+        self.invalid_reason = None;
+        self.farm_points.clear();
+        self.status = "Build mode cancelled.".to_string();
     }
 }
 
@@ -41,6 +72,8 @@ pub enum PlacementIssue {
     Occupied,
     EntranceBlocked,
     TooSteep,
+    TooFewPoints,
+    InvalidShape,
 }
 
 impl PlacementIssue {
@@ -50,6 +83,8 @@ impl PlacementIssue {
             Self::Occupied => "blocked by another plan, building, resource, or entrance",
             Self::EntranceBlocked => "the entrance is blocked",
             Self::TooSteep => "the terrain is too steep",
+            Self::TooFewPoints => "at least three corners are required",
+            Self::InvalidShape => "the outline must be a convex non-overlapping polygon",
         }
     }
 }

@@ -1,11 +1,12 @@
 use bevy::{prelude::*, window::PrimaryWindow};
 
 use crate::{
-    building::{Blueprint, BuildState, CompletedBuilding},
+    building::{Blueprint, BuildState, CompletedBuilding, Footprint, point_in_polygon},
     colonist::Colonist,
+    farm::CompletedFarmPlot,
     math::{ray_terrain_intersection, terrain_pick_max_distance, xz_distance},
-    terrain::TerrainGenerationConfig,
-    types::{BuildingKind, CELL_SIZE},
+    terrain::{TerrainGenerationConfig, terrain_height},
+    types::{BuildingKind, CELL_SIZE, ConstructionKind},
     world::ResourceNode,
 };
 
@@ -22,6 +23,7 @@ impl Plugin for SelectionPlugin {
 pub enum SelectedTarget {
     Blueprint(Entity),
     Building(Entity),
+    Farm(Entity),
     Colonist(Entity),
     Resource(Entity),
 }
@@ -31,6 +33,7 @@ impl SelectedTarget {
         match self {
             Self::Blueprint(entity)
             | Self::Building(entity)
+            | Self::Farm(entity)
             | Self::Colonist(entity)
             | Self::Resource(entity) => entity,
         }
@@ -60,8 +63,9 @@ pub fn select_target(
     mut selection: ResMut<SelectionState>,
     resource_nodes: Query<(Entity, &ResourceNode, &Transform)>,
     colonists: Query<(Entity, &Colonist, &Transform)>,
-    blueprints: Query<(Entity, &Blueprint, &Transform)>,
+    blueprints: Query<(Entity, &Blueprint, &Transform, Option<&Footprint>)>,
     buildings: Query<(Entity, &CompletedBuilding, &Transform), Without<Blueprint>>,
+    farms: Query<(Entity, &CompletedFarmPlot, &Footprint), Without<Blueprint>>,
 ) {
     if keyboard.just_pressed(KeyCode::Escape) {
         selection.selected = None;
@@ -88,6 +92,7 @@ pub fn select_target(
     collect_colonist_hits(cursor_world, &colonists, &mut candidates);
     collect_blueprint_hits(cursor_world, &blueprints, &mut candidates);
     collect_building_hits(cursor_world, &buildings, &mut candidates);
+    collect_farm_hits(cursor_world, &farms, &mut candidates);
     collect_resource_hits(cursor_world, &resource_nodes, &mut candidates);
 
     selection.selected = best_hit(&candidates).map(|candidate| candidate.target);
@@ -95,15 +100,27 @@ pub fn select_target(
 
 pub fn draw_selection_highlight(
     selection: Res<SelectionState>,
+    terrain_config: Res<TerrainGenerationConfig>,
     mut gizmos: Gizmos,
     resource_nodes: Query<(Entity, &Transform), With<ResourceNode>>,
     colonists: Query<(Entity, &Transform), With<Colonist>>,
-    blueprints: Query<(Entity, &Blueprint, &Transform)>,
+    blueprints: Query<(Entity, &Blueprint, &Transform, Option<&Footprint>)>,
     buildings: Query<(Entity, &CompletedBuilding, &Transform), Without<Blueprint>>,
+    farms: Query<(Entity, &CompletedFarmPlot, &Footprint), Without<Blueprint>>,
 ) {
     let Some(selected) = selection.selected else {
         return;
     };
+
+    if draw_polygon_selection(
+        selected,
+        terrain_config.seed,
+        &mut gizmos,
+        &blueprints,
+        &farms,
+    ) {
+        return;
+    }
 
     let Some((position, radius)) = selected_position_and_radius(
         selected,
@@ -158,11 +175,19 @@ fn collect_colonist_hits(
 
 fn collect_blueprint_hits(
     cursor_world: Vec3,
-    blueprints: &Query<(Entity, &Blueprint, &Transform)>,
+    blueprints: &Query<(Entity, &Blueprint, &Transform, Option<&Footprint>)>,
     candidates: &mut Vec<HitCandidate>,
 ) {
-    for (entity, blueprint, transform) in blueprints {
-        if point_in_building_box(cursor_world, transform, blueprint.kind, 0.25) {
+    for (entity, blueprint, transform, footprint) in blueprints {
+        let hit = match blueprint.kind {
+            ConstructionKind::Building(kind) => {
+                point_in_building_box(cursor_world, transform, kind, 0.25)
+            }
+            ConstructionKind::Farm => footprint
+                .map(|footprint| point_in_farm_footprint(cursor_world, footprint))
+                .unwrap_or(false),
+        };
+        if hit {
             candidates.push(HitCandidate {
                 target: SelectedTarget::Blueprint(entity),
                 distance: xz_distance(cursor_world, transform.translation),
@@ -182,6 +207,22 @@ fn collect_building_hits(
             candidates.push(HitCandidate {
                 target: SelectedTarget::Building(entity),
                 distance: xz_distance(cursor_world, transform.translation),
+                priority: 2,
+            });
+        }
+    }
+}
+
+fn collect_farm_hits(
+    cursor_world: Vec3,
+    farms: &Query<(Entity, &CompletedFarmPlot, &Footprint), Without<Blueprint>>,
+    candidates: &mut Vec<HitCandidate>,
+) {
+    for (entity, _, footprint) in farms {
+        if point_in_farm_footprint(cursor_world, footprint) {
+            candidates.push(HitCandidate {
+                target: SelectedTarget::Farm(entity),
+                distance: distance_to_polygon_center(cursor_world, &footprint.polygon),
                 priority: 2,
             });
         }
@@ -209,7 +250,7 @@ fn selected_position_and_radius(
     selected: SelectedTarget,
     resource_nodes: &Query<(Entity, &Transform), With<ResourceNode>>,
     colonists: &Query<(Entity, &Transform), With<Colonist>>,
-    blueprints: &Query<(Entity, &Blueprint, &Transform)>,
+    blueprints: &Query<(Entity, &Blueprint, &Transform, Option<&Footprint>)>,
     buildings: &Query<(Entity, &CompletedBuilding, &Transform), Without<Blueprint>>,
 ) -> Option<(Vec3, f32)> {
     match selected {
@@ -225,9 +266,10 @@ fn selected_position_and_radius(
             blueprints
                 .get(entity)
                 .ok()
-                .map(|(_, blueprint, transform)| {
-                    let size = building_visual_size(blueprint.kind);
-                    (transform.translation, size.x.max(size.y) * 0.65)
+                .and_then(|(_, blueprint, transform, _)| {
+                    let kind = blueprint.kind.as_building()?;
+                    let size = building_visual_size(kind);
+                    Some((transform.translation, size.x.max(size.y) * 0.65))
                 })
         }
         SelectedTarget::Building(entity) => {
@@ -236,6 +278,59 @@ fn selected_position_and_radius(
                 (transform.translation, size.x.max(size.y) * 0.65)
             })
         }
+        SelectedTarget::Farm(_) => None,
+    }
+}
+
+fn draw_polygon_selection(
+    selected: SelectedTarget,
+    seed: u64,
+    gizmos: &mut Gizmos,
+    blueprints: &Query<(Entity, &Blueprint, &Transform, Option<&Footprint>)>,
+    farms: &Query<(Entity, &CompletedFarmPlot, &Footprint), Without<Blueprint>>,
+) -> bool {
+    match selected {
+        SelectedTarget::Blueprint(entity) => {
+            let Ok((_, blueprint, _, Some(footprint))) = blueprints.get(entity) else {
+                return false;
+            };
+            if blueprint.kind != ConstructionKind::Farm {
+                return false;
+            }
+            draw_polygon_outline(gizmos, seed, &footprint.polygon);
+            true
+        }
+        SelectedTarget::Farm(entity) => {
+            let Ok((_, _, footprint)) = farms.get(entity) else {
+                return false;
+            };
+            draw_polygon_outline(gizmos, seed, &footprint.polygon);
+            true
+        }
+        SelectedTarget::Building(_) | SelectedTarget::Colonist(_) | SelectedTarget::Resource(_) => {
+            false
+        }
+    }
+}
+
+fn draw_polygon_outline(gizmos: &mut Gizmos, seed: u64, polygon: &[Vec2]) {
+    if polygon.len() < 2 {
+        return;
+    }
+
+    let color = LinearRgba::rgb(1.0, 0.88, 0.18);
+    for index in 0..polygon.len() {
+        let start = polygon[index];
+        let end = polygon[(index + 1) % polygon.len()];
+        gizmos.line(
+            Vec3::new(
+                start.x,
+                terrain_height(seed, start.x, start.y) + 0.1,
+                start.y,
+            ),
+            Vec3::new(end.x, terrain_height(seed, end.x, end.y) + 0.1, end.y),
+            color,
+        );
     }
 }
 
@@ -276,6 +371,22 @@ fn point_in_rotated_box(point: Vec3, transform: &Transform, size: Vec2, padding:
     local.x.abs() <= half_x && local.z.abs() <= half_z
 }
 
+fn point_in_farm_footprint(point: Vec3, footprint: &Footprint) -> bool {
+    point_in_polygon(Vec2::new(point.x, point.z), &footprint.polygon)
+}
+
+fn distance_to_polygon_center(point: Vec3, polygon: &[Vec2]) -> f32 {
+    if polygon.is_empty() {
+        return 0.0;
+    }
+    let center = polygon
+        .iter()
+        .copied()
+        .fold(Vec2::ZERO, |sum, point| sum + point)
+        / polygon.len() as f32;
+    Vec2::new(point.x, point.z).distance(center)
+}
+
 fn building_visual_size(kind: BuildingKind) -> Vec2 {
     let definition = kind.definition();
 
@@ -288,7 +399,6 @@ fn building_visual_size(kind: BuildingKind) -> Vec2 {
         )
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -357,6 +467,28 @@ mod tests {
             &transform,
             BuildingKind::Storage,
             0.0
+        ));
+    }
+
+    #[test]
+    fn farm_hit_uses_polygon_footprint() {
+        let footprint = Footprint {
+            polygon: vec![
+                Vec2::new(0.0, 0.0),
+                Vec2::new(2.0, 0.0),
+                Vec2::new(2.0, 2.0),
+                Vec2::new(0.0, 2.0),
+            ],
+            passable: false,
+        };
+
+        assert!(point_in_farm_footprint(
+            Vec3::new(1.0, 0.0, 1.0),
+            &footprint
+        ));
+        assert!(!point_in_farm_footprint(
+            Vec3::new(3.0, 0.0, 1.0),
+            &footprint
         ));
     }
 }

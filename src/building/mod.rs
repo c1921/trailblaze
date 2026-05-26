@@ -9,7 +9,8 @@ mod state;
 pub use components::*;
 pub use geometry::{NavigationDirtyArea, WorldGeometry};
 pub use polygon::{
-    expanded_polygon, footprint_polygon, point_in_polygon, resource_obstacle_polygon,
+    expanded_polygon, footprint_polygon, is_convex_polygon, point_in_polygon, polygon_area,
+    polygon_has_self_intersection, resource_obstacle_polygon, signed_polygon_area,
 };
 pub use state::{BuildState, PlacementIssue};
 
