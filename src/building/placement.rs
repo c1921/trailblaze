@@ -62,14 +62,26 @@ pub fn update_build_preview(
     };
 
     let Some(construction) = build_state.selected else {
-        hide_preview(&mut build_state, &mut preview_query);
+        hide_preview(
+            &mut commands,
+            &mut build_state,
+            &mut preview_query,
+            &mut visual_query,
+            &mut farm_visual_query,
+        );
         hide_entrance_preview(&mut commands, &mut build_state);
         return;
     };
 
     let Some(cursor_world) = cursor_ground_position(&windows, &camera_query, terrain_config.seed)
     else {
-        hide_preview(&mut build_state, &mut preview_query);
+        hide_preview(
+            &mut commands,
+            &mut build_state,
+            &mut preview_query,
+            &mut visual_query,
+            &mut farm_visual_query,
+        );
         hide_entrance_preview(&mut commands, &mut build_state);
         return;
     };
@@ -404,7 +416,13 @@ fn update_farm_preview(
 
     build_state.status = farm_status(build_state, committed_issue);
     if draft_polygon.len() < 3 {
-        hide_preview(build_state, preview_query);
+        hide_preview(
+            commands,
+            build_state,
+            preview_query,
+            building_visuals,
+            farm_visuals,
+        );
         return;
     }
 
@@ -717,16 +735,37 @@ fn farm_gizmo_position(seed: u64, point: Vec2) -> Vec3 {
 }
 
 fn hide_preview(
+    commands: &mut Commands,
     build_state: &mut BuildState,
     preview_query: &mut Query<
         (Entity, &mut Transform, &mut Visibility),
         (With<BuildPreview>, Without<BuildingVisual>),
+    >,
+    building_visuals: &mut Query<
+        (
+            Entity,
+            &BuildingVisual,
+            &mut Transform,
+            &mut MeshMaterial3d<StandardMaterial>,
+        ),
+        Without<FarmVisual>,
+    >,
+    farm_visuals: &mut Query<
+        (
+            Entity,
+            &FarmVisual,
+            &mut Mesh3d,
+            &mut MeshMaterial3d<StandardMaterial>,
+        ),
+        Without<BuildingVisual>,
     >,
 ) {
     build_state.invalid_reason = None;
     build_state.last_valid = false;
     build_state.last_access_point = None;
     if let Some(entity) = build_state.preview_entity {
+        despawn_building_visual(commands, entity, building_visuals);
+        despawn_farm_visual(commands, entity, farm_visuals);
         if let Ok((_, _, mut visibility)) = preview_query.get_mut(entity) {
             *visibility = Visibility::Hidden;
         }
@@ -802,6 +841,132 @@ mod tests {
     use super::*;
     use crate::math::xz;
     use crate::types::BuildingKind;
+
+    fn spawn_preview_with_farm_visual(app: &mut App) -> (Entity, Entity) {
+        let preview = app
+            .world_mut()
+            .spawn((BuildPreview, Transform::default(), Visibility::Visible))
+            .id();
+        let farm_visual = app
+            .world_mut()
+            .spawn((
+                FarmVisual { owner: preview },
+                Mesh3d(Handle::default()),
+                MeshMaterial3d::<StandardMaterial>(Handle::default()),
+                ChildOf(preview),
+            ))
+            .id();
+        app.world_mut().resource_mut::<BuildState>().preview_entity = Some(preview);
+        (preview, farm_visual)
+    }
+
+    fn cleanup_preview_system(
+        mut commands: Commands,
+        mut build_state: ResMut<BuildState>,
+        mut preview_query: Query<
+            (Entity, &mut Transform, &mut Visibility),
+            (With<BuildPreview>, Without<BuildingVisual>),
+        >,
+        mut building_visuals: Query<
+            (
+                Entity,
+                &BuildingVisual,
+                &mut Transform,
+                &mut MeshMaterial3d<StandardMaterial>,
+            ),
+            Without<FarmVisual>,
+        >,
+        mut farm_visuals: Query<
+            (
+                Entity,
+                &FarmVisual,
+                &mut Mesh3d,
+                &mut MeshMaterial3d<StandardMaterial>,
+            ),
+            Without<BuildingVisual>,
+        >,
+    ) {
+        hide_preview(
+            &mut commands,
+            &mut build_state,
+            &mut preview_query,
+            &mut building_visuals,
+            &mut farm_visuals,
+        );
+    }
+
+    fn cleanup_cancelled_preview_system(
+        mut commands: Commands,
+        mut build_state: ResMut<BuildState>,
+        mut preview_query: Query<
+            (Entity, &mut Transform, &mut Visibility),
+            (With<BuildPreview>, Without<BuildingVisual>),
+        >,
+        mut building_visuals: Query<
+            (
+                Entity,
+                &BuildingVisual,
+                &mut Transform,
+                &mut MeshMaterial3d<StandardMaterial>,
+            ),
+            Without<FarmVisual>,
+        >,
+        mut farm_visuals: Query<
+            (
+                Entity,
+                &FarmVisual,
+                &mut Mesh3d,
+                &mut MeshMaterial3d<StandardMaterial>,
+            ),
+            Without<BuildingVisual>,
+        >,
+    ) {
+        if build_state.selected.is_none() {
+            hide_preview(
+                &mut commands,
+                &mut build_state,
+                &mut preview_query,
+                &mut building_visuals,
+                &mut farm_visuals,
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_farm_preview_cleanup_despawns_farm_visual() {
+        let mut app = App::new();
+        app.init_resource::<BuildState>();
+        let (preview, farm_visual) = spawn_preview_with_farm_visual(&mut app);
+        app.add_systems(Update, cleanup_preview_system);
+
+        app.update();
+
+        let mut farm_visuals = app.world_mut().query::<&FarmVisual>();
+        assert_eq!(farm_visuals.iter(app.world()).count(), 0);
+        assert!(app.world().get_entity(farm_visual).is_err());
+        assert_eq!(
+            *app.world().entity(preview).get::<Visibility>().unwrap(),
+            Visibility::Hidden
+        );
+    }
+
+    #[test]
+    fn cancelled_build_state_cleanup_despawns_farm_visual() {
+        let mut app = App::new();
+        app.init_resource::<BuildState>();
+        let (_, farm_visual) = spawn_preview_with_farm_visual(&mut app);
+        app.world_mut()
+            .resource_mut::<BuildState>()
+            .select_construction(ConstructionKind::Farm);
+        app.world_mut().resource_mut::<BuildState>().cancel();
+        app.add_systems(Update, cleanup_cancelled_preview_system);
+
+        app.update();
+
+        let mut farm_visuals = app.world_mut().query::<&FarmVisual>();
+        assert_eq!(farm_visuals.iter(app.world()).count(), 0);
+        assert!(app.world().get_entity(farm_visual).is_err());
+    }
 
     #[test]
     fn planned_entrance_uses_continuous_world_position() {

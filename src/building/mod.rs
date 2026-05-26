@@ -35,7 +35,8 @@ impl Plugin for BuildingPlugin {
                     lifecycle::update_blueprint_visuals,
                     lifecycle::finish_blueprints,
                     lifecycle::sync_entrance_markers,
-                ),
+                )
+                    .chain(),
             );
     }
 }
